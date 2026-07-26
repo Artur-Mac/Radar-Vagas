@@ -83,7 +83,6 @@ def test_successful_source_and_exact_deduplication(
     rec1 = RawJobRecord(
         source_name="source_dedup",
         source_job_id="job_1",
-        content_hash="hash_1",
         raw_payload="Data Analyst job posting",
         source_url="https://example.com/jobs/1",
     )
@@ -91,7 +90,6 @@ def test_successful_source_and_exact_deduplication(
     rec2_duplicate_id = RawJobRecord(
         source_name="source_dedup",
         source_job_id="job_1",
-        content_hash="hash_2",
         raw_payload="Data Analyst duplicate job posting",
         source_url="https://example.com/jobs/1",
     )
@@ -99,7 +97,6 @@ def test_successful_source_and_exact_deduplication(
     rec3_duplicate_hash = RawJobRecord(
         source_name="source_dedup",
         source_job_id="job_2",
-        content_hash="hash_1",
         raw_payload="Data Analyst job posting",
         source_url="https://example.com/jobs/2",
     )
@@ -107,7 +104,6 @@ def test_successful_source_and_exact_deduplication(
     rec4_unique = RawJobRecord(
         source_name="source_dedup",
         source_job_id="job_3",
-        content_hash="hash_3",
         raw_payload="Software Engineer job posting",
         source_url="https://example.com/jobs/3",
     )
@@ -167,7 +163,6 @@ def test_source_isolation(tmp_path: Path, offline_client: httpx.Client) -> None:
         rec = RawJobRecord(
             source_name="source_ok",
             source_job_id="ok_1",
-            content_hash="hash_ok",
             raw_payload="Data Engineer job",
             source_url="https://example.com/ok/1",
         )
@@ -210,63 +205,77 @@ def test_validation_missing_job_id_and_missing_payload(
         source_type=SourceType.aggregator_api,
         base_url="https://example.com/api",
     )
-
-    # Missing job_id (empty string)
-    rec_no_id = RawJobRecord(
-        source_name="source_validation",
-        source_job_id="",
-        content_hash="hash_no_id",
-        raw_payload="Data Science role",
-        source_url="https://example.com/jobs/1",
-    )
-    # Missing source_url and empty raw_payload
-    rec_no_payload_or_url = RawJobRecord(
-        source_name="source_validation",
-        source_job_id="job_nourl",
-        content_hash="hash_nourl",
-        raw_payload="",
-        source_url=None,
-    )
-    # Valid record
-    rec_valid = RawJobRecord(
-        source_name="source_validation",
-        source_job_id="job_valid",
-        content_hash="hash_valid",
-        raw_payload="Machine Learning Engineer",
-        source_url="https://example.com/jobs/valid",
-    )
-
-    def fetch_handler(client, limit=100, cursor=None):
-        return ConnectorResult(
+    records = [
+        RawJobRecord(
             source_name="source_validation",
-            state=RunState.success,
-            records=[rec_no_id, rec_no_payload_or_url, rec_valid],
-            records_fetched=3,
-        )
-
-    registry = ConnectorRegistry()
-    registry.register(
-        SourceType.aggregator_api,
-        lambda cfg: DummyConnector(cfg, fetch_side_effect=fetch_handler),
+            source_job_id="",
+            raw_payload="Data Science role",
+            source_url="https://example.com/jobs/1",
+        ),
+        RawJobRecord(
+            source_name="source_validation",
+            source_job_id="job_2",
+            raw_payload="No URL",
+            source_url=None,
+        ),
+        RawJobRecord(
+            source_name="source_validation",
+            source_job_id="job_3",
+            raw_payload="",
+            source_url="https://example.com/jobs/3",
+        ),
+    ]
+    connector = DummyConnector(
+        config,
+        fetch_side_effect=lambda client, limit=100, cursor=None: ConnectorResult(
+            source_name=config.name,
+            records=records,
+            records_fetched=len(records),
+        ),
     )
-
-    storage = LocalStorage(tmp_path)
-    runner = ConnectorRunner(registry=registry, storage=storage, client=offline_client)
+    registry = ConnectorRegistry()
+    registry.register(SourceType.aggregator_api, lambda cfg: connector)
+    runner = ConnectorRunner(
+        registry=registry,
+        storage=LocalStorage(tmp_path),
+        client=offline_client,
+    )
 
     manifest = runner.run([config])
 
-    assert manifest.summary.total_fetched == 3
-    assert manifest.summary.total_valid == 1
-    assert manifest.summary.total_rejected == 2
+    assert manifest.summary.total_rejected == 3
+    assert {record.reason for record in manifest.rejected} == {
+        "missing_source_job_id",
+        "missing_source_url",
+        "missing_raw_payload",
+    }
 
-    assert len(manifest.rejected) == 2
-    rejected_reasons = [r.reason for r in manifest.rejected]
-    assert "missing_source_job_id" in rejected_reasons
-    assert "missing_source_url" in rejected_reasons
 
-    run_dir = next((tmp_path / "runs").iterdir())
-    quarantine_files = list((run_dir / "quarantine").glob("*.json"))
-    assert len(quarantine_files) == 2
+def test_fail_fast_invalid_configuration_persists_manifest(
+    tmp_path: Path, offline_client: httpx.Client
+) -> None:
+    invalid = SourceConfig(
+        name="invalid_source",
+        source_type=SourceType.ats_greenhouse,
+        base_url="https://example.com/invalid",
+    )
+    remaining = SourceConfig(
+        name="remaining_source",
+        source_type=SourceType.ats_lever,
+        base_url="https://example.com/remaining",
+    )
+    runner = ConnectorRunner(
+        registry=ConnectorRegistry(),
+        storage=LocalStorage(tmp_path),
+        client=offline_client,
+    )
+
+    manifest = runner.run([invalid, remaining], fail_fast=True)
+
+    assert manifest.summary.total_sources_executed == 1
+    assert manifest.summary.sources[invalid.name].state == RunState.invalid_configuration
+    assert manifest.summary.sources[remaining.name].state == RunState.skipped_fail_fast
+    assert (tmp_path / "runs" / manifest.summary.run_id / "manifest.json").exists()
 
 
 def test_dry_run_does_not_create_files(tmp_path: Path, offline_client: httpx.Client) -> None:
@@ -280,7 +289,6 @@ def test_dry_run_does_not_create_files(tmp_path: Path, offline_client: httpx.Cli
         source_name=config.name,
         source_type=config.source_type,
         source_job_id="job_1",
-        content_hash="hash_1",
         raw_payload='{"title": "Data Engineer"}',
         source_url="https://example.com/jobs/1",
     )
@@ -364,7 +372,6 @@ def test_pagination_limits_and_loop_protection(
             RawJobRecord(
                 source_name="source_paginated_1",
                 source_job_id=f"p1_{i}",
-                content_hash=f"hash_p1_{i}",
                 raw_payload="data engineer",
                 source_url=f"https://example.com/p1_{i}",
             )
@@ -396,7 +403,6 @@ def test_pagination_limits_and_loop_protection(
             RawJobRecord(
                 source_name="source_paginated_2",
                 source_job_id=f"p2_{i}",
-                content_hash=f"hash_p2_{i}",
                 raw_payload="data scientist",
                 source_url=f"https://example.com/p2_{i}",
             )
@@ -436,7 +442,6 @@ def test_pagination_limits_and_loop_protection(
             RawJobRecord(
                 source_name="source_loop",
                 source_job_id=f"loop_{page_count}",
-                content_hash=f"hash_loop_{page_count}",
                 raw_payload="data analyst",
                 source_url="https://example.com/loop",
             )
@@ -481,28 +486,24 @@ def test_data_ai_relevance_filter(tmp_path: Path, offline_client: httpx.Client) 
         RawJobRecord(
             source_name="source_relevance",
             source_job_id="r1",
-            content_hash="h1",
             raw_payload="We are hiring a Senior Data Engineer",
             source_url="https://example.com/r1",
         ),
         RawJobRecord(
             source_name="source_relevance",
             source_job_id="r2",
-            content_hash="h2",
             raw_payload="Machine Learning Specialist needed",
             source_url="https://example.com/r2",
         ),
         RawJobRecord(
             source_name="source_relevance",
             source_job_id="r3",
-            content_hash="h3",
             raw_payload="AI & MLOps Infrastructure Architect",
             source_url="https://example.com/r3",
         ),
         RawJobRecord(
             source_name="source_relevance",
             source_job_id="r4",
-            content_hash="h4",
             raw_payload="Senior React Frontend Developer",
             source_url="https://example.com/r4",
         ),
@@ -545,7 +546,6 @@ def test_mocked_connector_spec(tmp_path: Path, offline_client: httpx.Client) -> 
     rec = RawJobRecord(
         source_name="source_mocked",
         source_job_id="m1",
-        content_hash="hm1",
         raw_payload="Lead Data Scientist",
         source_url="https://example.com/m1",
     )

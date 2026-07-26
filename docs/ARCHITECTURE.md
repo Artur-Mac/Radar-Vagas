@@ -1,10 +1,11 @@
-# Radar-Vagas Architecture Document (Época 3 - Initial Job Ingestion)
+# Radar-Vagas Architecture Document (Época 4 foundation)
 
 ## 1. Overview
 
-**Radar-Vagas** is a local-first job market intelligence platform. Época 3 adds a
-run-scoped ingestion service and local raw storage to the foundation and connector framework
-delivered by Épocas 1 and 2.
+**Radar-Vagas** is a local-first job market intelligence platform. Época 3 added a
+run-scoped ingestion service and local raw storage. The current Época 4 foundation adds
+cross-run observations in DuckDB and content-addressed raw blobs while preserving offline
+operation and compatibility with the existing run folders.
 
 ## 2. Directory Layout & Layer Separation
 
@@ -27,7 +28,7 @@ Radar-Vagas/
 │   └── radar_vagas/
 │       ├── __init__.py         # Package version export
 │       ├── cli.py              # CLI entry point (radar-vagas doctor, info, sources)
-│       ├── core/               # Configuration and Logging
+│       ├── core/               # Configuration, logging, ingestion, and history services
 │       │   ├── config.py       # Typed Settings (pydantic-settings)
 │       │   └── logging.py      # Standardized logging formatter
 │       ├── domain/             # Core Entities, Schemas & Protocols
@@ -42,11 +43,12 @@ Radar-Vagas/
 │       │   ├── catalog.py      # TOML catalog loader and filter utilities
 │       │   └── registry.py     # SourceType → ConnectorFactory registry
 │       └── infrastructure/     # External Clients & Infrastructure Interfaces
+│           ├── history.py      # DuckDB metadata and SHA-256 content-addressed storage
 │           ├── http.py         # HttpPolicy, polite_get, retry/backoff
 │           └── llm/
 │               └── ollama_client.py  # Ollama service diagnostics
 ├── poc/                        # Isolated experimental PoC scripts & exploratory code
-└── tests/                      # Automated test suite (pytest, 75 tests)
+└── tests/                      # Automated offline test suite
 ```
 
 ## 3. Core Architectural Decisions
@@ -151,5 +153,18 @@ data/runs/<run_id>/
 Writes use a temporary file plus an atomic no-overwrite link. `--dry-run` computes the same
 manifest in memory without creating files or directories.
 
-The current storage is deliberately run-scoped. Cross-run identity, snapshots, replay, job
-status, and retention policies are deferred to Época 4.
+## 7. Historical Storage Foundation (Época 4 in progress)
+
+`HistoryService` imports both Época 3 payload-only files and newer record envelopes.
+`HistoricalStorage` stores immutable payload bytes under a SHA-256 content-addressed layout and
+keeps runs, source executions, source jobs, and observations in DuckDB. A run import is
+idempotent and its database changes are transactional. Every observation retains the hash and
+source URL needed for deterministic offline replay.
+
+Lifecycle transitions are intentionally conservative: only a source run marked
+`coverage_complete` can increment missing-run counters, and a job is closed after three
+consecutive complete misses. A later observation marks it as reopened.
+
+The implementation is a foundation, not completion of Época 4. Explicit change-event
+classification, cleaned text, normalized/enriched table separation, richer import reporting,
+retention and backup controls, and efficient large backfills remain pending.

@@ -7,8 +7,19 @@ from pathlib import Path
 from radar_vagas import __version__
 from radar_vagas.core.config import get_settings
 from radar_vagas.core.logging import setup_logging
+from radar_vagas.domain.models import RunState
 from radar_vagas.infrastructure.llm.ollama_client import OllamaClient
 from radar_vagas.sources.catalog import get_active_sources, load_catalog
+
+
+def positive_int(value: str) -> int:
+    try:
+        ivalue = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value} is not a valid integer")
+    if ivalue <= 0:
+        raise argparse.ArgumentTypeError(f"{value} must be a positive integer")
+    return ivalue
 
 
 def main(args: list[str] | None = None) -> int:
@@ -53,8 +64,12 @@ def main(args: list[str] | None = None) -> int:
         "--source", action="append", help="Specific source to run (repeatable)"
     )
     collect_parser.add_argument("--source-type", type=str, help="Specific source type to run")
-    collect_parser.add_argument("--limit", type=int, help="Global limit of records to fetch")
-    collect_parser.add_argument("--per-source-limit", type=int, help="Limit of records per source")
+    collect_parser.add_argument(
+        "--limit", type=positive_int, help="Global limit of records to fetch"
+    )
+    collect_parser.add_argument(
+        "--per-source-limit", type=positive_int, help="Limit of records per source"
+    )
     collect_parser.add_argument(
         "--catalog-dir", type=str, default="catalogs", help="Path to catalog directory"
     )
@@ -75,6 +90,24 @@ def main(args: list[str] | None = None) -> int:
     runs_show = runs_subparsers.add_parser("show", help="Show details of a specific run")
     runs_show.add_argument("run_id", type=str, help="The ID of the run to show")
     runs_show.add_argument("--output-dir", type=str, default="data", help="Base directory for runs")
+
+    # Command: history
+    history_parser = subparsers.add_parser("history", help="Manage historical duckdb+cas storage")
+    history_subparsers = history_parser.add_subparsers(dest="history_command", required=True)
+
+    history_import = history_subparsers.add_parser(
+        "import", help="Import all runs from local storage into historical storage"
+    )
+    history_import.add_argument(
+        "--output-dir", type=str, default="data", help="Base directory for local runs"
+    )
+    history_import.add_argument("--db-path", type=str, help="Path to DuckDB database")
+
+    history_replay = history_subparsers.add_parser(
+        "replay", help="Replay records from a specific run"
+    )
+    history_replay.add_argument("run_id", type=str, help="The ID of the run to replay")
+    history_replay.add_argument("--db-path", type=str, help="Path to DuckDB database")
 
     parsed_args = parser.parse_args(args)
 
@@ -179,6 +212,7 @@ def main(args: list[str] | None = None) -> int:
                 configs=sources,
                 global_limit=parsed_args.limit,
                 per_source_limit=parsed_args.per_source_limit,
+                fail_fast=parsed_args.fail_fast,
                 persist=not parsed_args.dry_run,
             )
 
@@ -197,6 +231,21 @@ def main(args: list[str] | None = None) -> int:
         if not parsed_args.dry_run:
             print(f"Manifest:    {storage.get_run_dir(manifest.summary.run_id) / 'manifest.json'}")
         print("=" * 60 + "\n")
+
+        # Exit code evaluation
+        if manifest.summary.total_sources_executed == 0:
+            return 1
+
+        success_count = sum(
+            1
+            for s in manifest.summary.sources.values()
+            if s.state in (RunState.success, RunState.empty, RunState.skipped_global_limit)
+        )
+
+        if success_count == 0:
+            return 1  # Total failure
+        if success_count < manifest.summary.total_sources_executed:
+            return 2  # Partial failure
 
         return 0
 
@@ -234,6 +283,46 @@ def main(args: list[str] | None = None) -> int:
 
         print("=" * 60 + "\n")
         return 0
+
+    if parsed_args.command == "history":
+        from radar_vagas.core.history_service import HistoryService
+        from radar_vagas.infrastructure.history import HistoricalStorage
+        from radar_vagas.infrastructure.storage import LocalStorage
+
+        db_path = parsed_args.db_path or settings.db_path
+
+        if parsed_args.history_command == "import":
+            output_dir = Path(parsed_args.output_dir)
+            storage = LocalStorage(output_dir)
+            history = HistoricalStorage(Path(db_path).parent, db_path=Path(db_path))
+            service = HistoryService(storage, history)
+
+            print(f"📦 Importing runs from {storage.runs_dir} into historical storage...")
+            count = service.import_all_runs()
+            history.close()
+            print(f"✅ Imported {count} run(s) successfully.")
+            return 0
+
+        if parsed_args.history_command == "replay":
+            history = HistoricalStorage(Path(db_path).parent, db_path=Path(db_path))
+            # Dummy storage since we only replay
+            service = HistoryService(LocalStorage(Path("data")), history)
+
+            print(f"⏪ Replaying run {parsed_args.run_id}...")
+            records = service.get_run_records(parsed_args.run_id)
+            history.close()
+
+            print("\n" + "=" * 60)
+            print(f"🔄 REPLAY RESULTS: {parsed_args.run_id}")
+            print("=" * 60)
+            if not records:
+                print("  No records found or run not imported.")
+            else:
+                for rec in records:
+                    print(f"  • {rec.source_name:<15} | Job ID: {rec.source_job_id}")
+            print(f"\n  Total Records: {len(records)}")
+            print("=" * 60 + "\n")
+            return 0
 
     parser.print_help()
     return 0

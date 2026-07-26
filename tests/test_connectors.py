@@ -64,7 +64,6 @@ def test_remotive_normalize() -> None:
     raw_record = RawJobRecord(
         source_name="remotive_test",
         source_job_id="123",
-        content_hash="hash123",
         raw_payload='{"id": 123, "title": "Data Engineer", "company_name": "TechCo", "url": "https://remotive.com/jobs/123", "description": "Build pipelines", "candidate_required_location": "Worldwide", "job_type": "full_time", "publication_date": "2024-01-15T10:00:00"}',
         source_url="https://remotive.com/jobs/123",
     )
@@ -155,7 +154,6 @@ def test_arbeitnow_normalize() -> None:
     raw_record = RawJobRecord(
         source_name="arbeitnow_test",
         source_job_id="data-eng-123",
-        content_hash="hash456",
         raw_payload='{"slug": "data-eng-123", "title": "Data Engineer", "company_name": "DataCo", "url": "https://arbeitnow.com/jobs/data-eng-123", "description": "ETL", "location": "Berlin", "remote": true, "created_at": 1705312800}',
         source_url="https://arbeitnow.com/jobs/data-eng-123",
     )
@@ -246,7 +244,6 @@ def test_greenhouse_normalize() -> None:
     raw_record = RawJobRecord(
         source_name="greenhouse_gitlab",
         source_job_id="gitlab_456",
-        content_hash="hash789",
         raw_payload='{"id": 456, "title": "ML Engineer", "absolute_url": "https://boards.greenhouse.io/gitlab/jobs/456", "content": "Deep learning", "location": {"name": "Remote"}, "updated_at": "2024-01-10T12:00:00", "_board_identifier": "gitlab"}',
         source_url="https://boards.greenhouse.io/gitlab/jobs/456",
     )
@@ -337,7 +334,6 @@ def test_lever_normalize() -> None:
     raw_record = RawJobRecord(
         source_name="lever_spotify",
         source_job_id="spotify_abc-123",
-        content_hash="hashabc",
         raw_payload='{"id": "abc-123", "text": "Analytics Engineer", "hostedUrl": "https://jobs.lever.co/spotify/abc-123", "applyUrl": "https://jobs.lever.co/spotify/abc-123/apply", "descriptionPlain": "SQL expert", "categories": {"location": "Remote - US"}, "createdAt": 1705312800000, "_company_identifier": "spotify"}',
         source_url="https://jobs.lever.co/spotify/abc-123",
     )

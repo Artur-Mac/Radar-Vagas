@@ -60,7 +60,7 @@ class RemotiveConnector:
 
             for job in jobs:
                 try:
-                    payload_str = json.dumps(job)
+                    payload_str = json.dumps(job, separators=(",", ":"), sort_keys=True)
                     records.append(
                         RawJobRecord(
                             source_name=self._config.name,

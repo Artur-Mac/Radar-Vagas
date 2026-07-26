@@ -6,6 +6,14 @@ import sys
 from radar_vagas.core.config import Settings
 
 
+class _DynamicStdoutHandler(logging.StreamHandler):
+    """Resolve stdout at emit time so test/CLI capture streams cannot go stale."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.stream = sys.stdout
+        super().emit(record)
+
+
 def setup_logging(settings: Settings) -> logging.Logger:
     """Configure consistent formatted logging for the application."""
     logger = logging.getLogger("radar_vagas")
@@ -16,7 +24,7 @@ def setup_logging(settings: Settings) -> logging.Logger:
         existing_handler.close()
     logger.handlers.clear()
 
-    handler = logging.StreamHandler(sys.stdout)
+    handler = _DynamicStdoutHandler()
     formatter = logging.Formatter(
         fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",

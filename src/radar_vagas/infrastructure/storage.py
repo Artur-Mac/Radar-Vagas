@@ -13,6 +13,11 @@ class LocalStorage:
     def __init__(self, base_dir: Path) -> None:
         self.base_dir = base_dir
 
+    @property
+    def runs_dir(self) -> Path:
+        """Directory containing all runs."""
+        return self.base_dir / "runs"
+
     def get_run_dir(self, run_id: str) -> Path:
         """Get the base directory for a specific run."""
         return self.base_dir / "runs" / run_id

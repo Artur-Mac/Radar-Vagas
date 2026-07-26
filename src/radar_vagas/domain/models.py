@@ -1,10 +1,11 @@
 """Core domain data models for Radar-Vagas."""
 
+import hashlib
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Literal
 
-from pydantic import AnyHttpUrl, BaseModel, Field
+from pydantic import AnyHttpUrl, BaseModel, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -31,6 +32,9 @@ class RunState(str, Enum):
     temporary_failure = "temporary_failure"
     permanent_failure = "permanent_failure"
     disabled = "disabled"
+    skipped_global_limit = "skipped_global_limit"
+    skipped_fail_fast = "skipped_fail_fast"
+    invalid_configuration = "invalid_configuration"
 
 
 # ---------------------------------------------------------------------------
@@ -44,10 +48,21 @@ class RawJobRecord(BaseModel):
     source_name: str
     source_type: SourceType | None = None
     source_job_id: str
-    content_hash: str
+    content_hash: str = ""
     raw_payload: str
     collected_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     source_url: str | None = None
+
+    @model_validator(mode="after")
+    def validate_and_hash(self) -> "RawJobRecord":
+        recomputed = hashlib.sha256(self.raw_payload.encode("utf-8")).hexdigest()
+        if self.content_hash and self.content_hash != recomputed:
+            raise ValueError(
+                f"content_hash mismatch: expected {recomputed}, got {self.content_hash}"
+            )
+        self.content_hash = recomputed
+
+        return self
 
 
 class CanonicalJob(BaseModel):
@@ -124,6 +139,17 @@ class SourceConfig(BaseModel):
     description: str = ""
     career_url: str | None = None
 
+    # Governance
+    access_type: Literal["public", "authenticated", "paid", "unknown"] = "unknown"
+    authentication_required: bool = False
+    credential_env_var: str | None = None
+    documented_rate_limit: str | None = None
+    terms_url: str | None = None
+    redistribution_policy: str | None = None
+    retention_notes: str | None = None
+    attribution_required: bool | None = None
+    reviewed_at: datetime | None = None
+
 
 class CollectionError(BaseModel):
     """Structured error captured during connector execution."""
@@ -195,6 +221,7 @@ class SourceRunSummary(BaseModel):
 
     source_name: str
     state: RunState
+    coverage_complete: bool = False
     records_fetched: int = 0
     records_valid: int = 0
     records_rejected: int = 0

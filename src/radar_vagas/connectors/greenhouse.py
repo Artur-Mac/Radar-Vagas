@@ -65,7 +65,7 @@ class GreenhouseConnector:
             for job in jobs:
                 try:
                     job["_board_identifier"] = board
-                    payload_str = json.dumps(job)
+                    payload_str = json.dumps(job, separators=(",", ":"), sort_keys=True)
                     records.append(
                         RawJobRecord(
                             source_name=self._config.name,

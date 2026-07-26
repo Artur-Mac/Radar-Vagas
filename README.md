@@ -4,11 +4,14 @@
 
 ---
 
-## 1. Project Goal & Current Status (Época 3 - Initial Job Ingestion)
+## 1. Project Goal & Current Status (Época 4 in progress)
 
 Épocas 1 and 2 established the local foundation and connector framework. Época 3 adds
 multi-source ingestion, run manifests, raw payload persistence, exact in-run deduplication,
-quarantine, pagination, and deterministic relevance screening.
+quarantine, pagination, and deterministic relevance screening. The current Época 4 foundation
+adds content-addressed raw storage, DuckDB observations, source-job lifecycle tracking, and
+offline replay. Época 4 is not complete yet; normalization and cleaned/enriched layers remain
+separate future work.
 
 **Completed:**
 - Core package structure under `src/radar_vagas/` with typed configuration, CLI, consistent formatted logging, and Ollama diagnostics.
@@ -18,6 +21,8 @@ quarantine, pagination, and deterministic relevance screening.
 - Connector Registry: Factory-pattern mapping `SourceType → Connector` for extensibility.
 - Ingestion Runner: Isolated source execution with global/per-source limits and run summaries.
 - Local Run Storage: Atomic, no-overwrite persistence under `data/runs/<run_id>/`.
+- Historical Foundation: Idempotent and transactional import into DuckDB plus SHA-256
+  content-addressed blobs, including replay of legacy Época 3 runs.
 
 > [!NOTE]
 > **PoC Technical Review Note**: The initial PoC proved end-to-end data flow (ingestion, raw storage, canonical schema mapping, DuckDB analytics). However, per [TECHNICAL_REVIEW.md](poc/TECHNICAL_REVIEW.md), the PoC report does **NOT** constitute proof of local LLM quality (H4), LLM latency/throughput (H5), fuzzy deduplication (H6), or recommendation utility (H7) until a manually labeled evaluation dataset is executed.
@@ -86,6 +91,12 @@ You can run the application using the `radar-vagas` command or `uv run radar-vag
 - **Inspect a persisted run**:
   ```bash
   uv run radar-vagas runs show <run-id>
+  ```
+
+- **Import local runs and replay one without network access**:
+  ```bash
+  uv run radar-vagas history import --output-dir data --db-path data/radar_vagas.db
+  uv run radar-vagas history replay <run-id> --db-path data/radar_vagas.db
   ```
 
 The `doctor` command inspects whether the Ollama HTTP daemon is reachable and whether the configured model is installed locally. If Ollama is offline, it outputs a clear explanatory status message without crashing.
@@ -185,6 +196,7 @@ Radar-Vagas/
 │       ├── __init__.py         # Package version
 │       ├── cli.py              # Application CLI Entrypoint
 │       ├── core/               # Configuration & Logging
+│       │   └── history_service.py # Legacy import and offline replay service
 │       ├── domain/             # Domain Models, Schemas & Connector Protocol
 │       │   ├── models.py       # CanonicalJob, SourceConfig, ConnectorResult, etc.
 │       │   └── connector.py    # JobConnector Protocol (structural interface)
@@ -197,6 +209,7 @@ Radar-Vagas/
 │       │   ├── catalog.py      # TOML catalog loader
 │       │   └── registry.py     # SourceType → Connector factory registry
 │       └── infrastructure/     # External Services & HTTP Policies
+│           ├── history.py      # DuckDB metadata and SHA-256 blob storage
 │           ├── http.py         # HttpPolicy, polite_get, retry/backoff
 │           └── llm/
 │               └── ollama_client.py
@@ -214,7 +227,9 @@ Radar-Vagas/
 
 - **Heuristic Engine vs. LLM**: The PoC uses deterministic rules for some extraction and classification tasks. These rules do not generate new prose, but can still produce false positives and false negatives and require evaluation against labeled data.
 - **LLM Inference**: LLM enrichment via Ollama is optional and deferred. LLM quality, latency percentiles, and structured extraction precision will be formally evaluated in future epics using labeled ground-truth fixtures per [TECHNICAL_REVIEW.md](poc/TECHNICAL_REVIEW.md).
-- **Ingestion is run-scoped**: Época 3 preserves immutable raw payloads per run. Cross-run
-  history, snapshots, `first_seen`/`last_seen`, replay, and closure detection belong to Época 4.
+- **Historical storage is an Época 4 foundation**: cross-run observations, `first_seen`,
+  `last_seen`, conservative closure detection, and offline replay are implemented. Explicit
+  change events, richer source-run metadata, import failure summaries, retention controls,
+  backup/restore, and performance tuning for large backfills are still pending.
 - **Relevance is exploratory**: the current regex is intentionally broad and must not be read as
   a validated count of suitable Data/AI roles.
