@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from radar_vagas.domain.models import (
         CanonicalJob,
         ConnectorResult,
+        Pagination,
         RawJobRecord,
         SourceConfig,
     )
@@ -28,7 +29,9 @@ class JobConnector(Protocol):
         """Return the source configuration driving this connector."""
         ...
 
-    def fetch(self, client: httpx.Client, *, limit: int = 100) -> ConnectorResult:
+    def fetch(
+        self, client: httpx.Client, *, limit: int = 100, cursor: Pagination | None = None
+    ) -> ConnectorResult:
         """Fetch raw records from the source, returning a structured result."""
         ...
 

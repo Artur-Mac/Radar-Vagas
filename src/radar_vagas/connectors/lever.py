@@ -14,6 +14,7 @@ from radar_vagas.domain.models import (
     CanonicalJob,
     CollectionError,
     ConnectorResult,
+    Pagination,
     RawJobRecord,
     SourceConfig,
 )
@@ -39,12 +40,15 @@ class LeverConnector:
     def source_config(self) -> SourceConfig:
         return self._config
 
-    def fetch(self, client: httpx.Client, *, limit: int = 100) -> ConnectorResult:
+    def fetch(
+        self, client: httpx.Client, *, limit: int = 100, cursor: Pagination | None = None
+    ) -> ConnectorResult:
         """Fetch raw job records from a single Lever company."""
         start = time.monotonic()
         errors: list[CollectionError] = []
         records: list[RawJobRecord] = []
         company = self._config.company_identifier
+        next_page = Pagination(has_more=False)
 
         policy = HttpPolicy(
             timeout=self._config.request_timeout,
@@ -99,6 +103,7 @@ class LeverConnector:
             records_failed=len(errors),
             errors=errors,
             duration_seconds=time.monotonic() - start,
+            next_page=next_page,
         )
 
     def normalize(self, raw_record: RawJobRecord) -> CanonicalJob:

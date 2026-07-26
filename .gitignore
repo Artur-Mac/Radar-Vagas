@@ -27,3 +27,4 @@ poc/data/normalized/*
 .vscode/
 .idea/
 .DS_Store
+data/runs/

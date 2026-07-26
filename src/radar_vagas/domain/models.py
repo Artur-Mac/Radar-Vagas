@@ -22,6 +22,17 @@ class SourceType(str, Enum):
     career_page = "career_page"
 
 
+class RunState(str, Enum):
+    """Explicit states for a source collection run."""
+
+    success = "success"
+    empty = "empty"
+    partial = "partial"
+    temporary_failure = "temporary_failure"
+    permanent_failure = "permanent_failure"
+    disabled = "disabled"
+
+
 # ---------------------------------------------------------------------------
 # Core Job Models
 # ---------------------------------------------------------------------------
@@ -123,13 +134,104 @@ class CollectionError(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+class Pagination(BaseModel):
+    """Pagination contract for connector fetch loops."""
+
+    cursor: str | None = None
+    page: int | None = None
+    next_page_url: str | None = None
+    has_more: bool = False
+
+
 class ConnectorResult(BaseModel):
     """Execution result from a single connector run."""
 
     source_name: str
+    state: RunState = RunState.success
     records: list[RawJobRecord] = Field(default_factory=list)
     records_fetched: int = 0
     records_normalized: int = 0
     records_failed: int = 0
     errors: list[CollectionError] = Field(default_factory=list)
     duration_seconds: float = 0.0
+    next_page: Pagination | None = None
+
+
+# ---------------------------------------------------------------------------
+# Ingestion & Manifest Models
+# ---------------------------------------------------------------------------
+
+
+class RejectedRecord(BaseModel):
+    """A record rejected during minimal validation."""
+
+    source_name: str
+    source_job_id: str | None = None
+    reason: str
+
+
+class QuarantinedRecord(BaseModel):
+    """A record quarantined due to parsing/schema errors."""
+
+    source_name: str
+    source_job_id: str | None = None
+    error_type: str
+    message: str
+    phase: str
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    raw_payload: str | None = None
+
+
+class ExactDuplicate(BaseModel):
+    """A record detected as an exact duplicate during the run."""
+
+    source_name: str
+    source_job_id: str
+    reason: str = "same_run_content_hash"
+
+
+class SourceRunSummary(BaseModel):
+    """Summary metrics for a single source execution."""
+
+    source_name: str
+    state: RunState
+    records_fetched: int = 0
+    records_valid: int = 0
+    records_rejected: int = 0
+    records_quarantined: int = 0
+    records_duplicated: int = 0
+    records_relevant: int = 0
+    duration_seconds: float = 0.0
+    errors: list[CollectionError] = Field(default_factory=list)
+
+
+class IngestionSummary(BaseModel):
+    """Global summary of an ingestion run."""
+
+    run_id: str
+    started_at: datetime
+    finished_at: datetime
+    version: str
+    total_sources_requested: int
+    total_sources_executed: int
+    global_limit: int | None
+    per_source_limit: int | None
+
+    total_fetched: int = 0
+    total_valid: int = 0
+    total_rejected: int = 0
+    total_quarantined: int = 0
+    total_duplicated: int = 0
+    total_relevant: int = 0
+
+    sources: dict[str, SourceRunSummary] = Field(default_factory=dict)
+    duration_seconds: float = 0.0
+
+
+class RunManifest(BaseModel):
+    """Full manifest of a completed run, written to disk."""
+
+    summary: IngestionSummary
+    rejected: list[RejectedRecord] = Field(default_factory=list)
+    quarantined: list[QuarantinedRecord] = Field(default_factory=list)
+    duplicates: list[ExactDuplicate] = Field(default_factory=list)
