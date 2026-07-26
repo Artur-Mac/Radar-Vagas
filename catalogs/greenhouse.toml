@@ -9,6 +9,8 @@ request_timeout = 15.0
 rate_limit_delay = 1.0
 description = "Canonical Greenhouse board"
 career_url = "https://canonical.com/careers"
+access_type = "public"
+authentication_required = false
 
 [[sources]]
 name = "greenhouse_gitlab"
@@ -21,6 +23,8 @@ request_timeout = 15.0
 rate_limit_delay = 1.0
 description = "GitLab Greenhouse board"
 career_url = "https://about.gitlab.com/jobs/"
+access_type = "public"
+authentication_required = false
 
 [[sources]]
 name = "greenhouse_cloudflare"
@@ -32,6 +36,8 @@ active = true
 request_timeout = 15.0
 rate_limit_delay = 1.0
 description = "Cloudflare Greenhouse board"
+access_type = "public"
+authentication_required = false
 
 [[sources]]
 name = "greenhouse_datadog"
@@ -43,6 +49,8 @@ active = true
 request_timeout = 15.0
 rate_limit_delay = 1.0
 description = "Datadog Greenhouse board"
+access_type = "public"
+authentication_required = false
 
 [[sources]]
 name = "greenhouse_grafana"
@@ -54,6 +62,8 @@ active = true
 request_timeout = 15.0
 rate_limit_delay = 1.0
 description = "Grafana Labs Greenhouse board"
+access_type = "public"
+authentication_required = false
 
 [[sources]]
 name = "greenhouse_cockroachlabs"
@@ -65,3 +75,5 @@ active = true
 request_timeout = 15.0
 rate_limit_delay = 1.0
 description = "Cockroach Labs Greenhouse board"
+access_type = "public"
+authentication_required = false

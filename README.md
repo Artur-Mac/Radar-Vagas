@@ -4,32 +4,26 @@
 
 ---
 
-## 1. Project Goal & Current Status (Época 4 hardening)
+## 1. Project Goal & Current Status (Época 4 Completed)
 
-Épocas 1 and 2 established the local foundation and connector framework. Época 3 adds
-multi-source ingestion, run manifests, raw payload persistence, exact in-run deduplication,
-quarantine, pagination, and deterministic relevance screening. Época 4 now provides a substantial
-historical foundation with DuckDB metadata, CAS blob storage, source-job lifecycle tracking,
-import reporting, migrations, integrity diagnostics, and configurable fairer scheduling.
+Épocas 1 and 2 established the local foundation and connector framework. Época 3 added multi-source ingestion, run manifests, raw payload persistence, exact in-run deduplication, quarantine, pagination, and deterministic relevance screening. **Época 4 (Raw Data and Historical Storage)** is now fully implemented and hardened, providing a robust historical storage engine powered by DuckDB, SHA-256 Content-Addressed Storage (CAS) blobs, versioned HTML/text cleaning, backup and restore snapshots, retention pruning, migration tampering protection, source governance, and scale benchmarks.
 
-Época 4 remains in hardening until cleaned source text, normalized-record linkage, complete
-integrity verification, and retention/backup controls satisfy the roadmap acceptance criteria.
-
-**Completed:**
-- Core package structure under `src/radar_vagas/` with typed configuration, CLI, consistent formatted logging, and Ollama diagnostics.
-- Source Catalog: TOML-driven configuration for all job data sources (`catalogs/`).
-- Connector Framework: Protocol-based connector interface with 4 tested implementations (Remotive, Arbeitnow, Greenhouse, Lever).
-- HTTP Policy Layer: Centralised timeouts, retries with exponential backoff, rate limiting, and user-agent management.
-- Connector Registry: Factory-pattern mapping `SourceType → Connector` for extensibility.
-- Ingestion Runner: Isolated source execution with global/per-source limits and run summaries.
-- Local Run Storage: Atomic, no-overwrite persistence under `data/runs/<run_id>/`.
-- Historical Foundation: Idempotent and transactional import into DuckDB plus SHA-256
-  content-addressed blobs, including replay of legacy Época 3 runs.
-- Governance & Quality: Built-in SourceConfig validation for credentials and usage terms.
-- Fair Ingestion Scheduling: Sources rotate dynamically using a scheduling quantum.
+**Completed Features:**
+- **Core Package**: Typed configuration, CLI, formatted logging, and Ollama diagnostics.
+- **Source Catalog**: TOML-driven source configurations (`catalogs/`) with governance metadata (`access_type`, `authentication_required`, `terms_url`).
+- **Connector Framework**: Protocol-based interface with 4 production connectors (Remotive, Arbeitnow, Greenhouse, Lever).
+- **HTTP Policy**: Centralized timeouts, retries with exponential backoff, rate limiting, and custom user-agents.
+- **Fair Ingestion Scheduling**: Dynamic round-robin rotation via a configurable `scheduling_quantum`.
+- **Local Ingestion Storage**: Atomic raw run persistence under `data/runs/<run_id>/`.
+- **Historical Database & CAS**: Idempotent DuckDB metadata storage linked to SHA-256 CAS payload blobs with integrity verification.
+- **Versioned Cleaned Text**: Deterministic HTML tag stripping, entity decoding, and transformation versioning stored in `cleaned_source_text`.
+- **Quarantine & Reprocessing**: Failed raw records captured in `historical_quarantine` with retry support via `history reprocess-quarantine`.
+- **Backup & Restore**: Atomic snapshot backup (DB + Blobs + `backup_manifest.json`) and safe restore with integrity checks.
+- **Retention Controls**: Configurable age and run-count pruning with `--preview` (dry-run) and ref-count blob protection.
+- **Migration Hardening**: Migration identity and SHA-256 checksum tracking in `schema_migrations` to prevent migration tampering.
 
 > [!NOTE]
-> **PoC Technical Review Note**: The initial PoC proved end-to-end data flow (ingestion, raw storage, canonical schema mapping, DuckDB analytics). However, per [TECHNICAL_REVIEW.md](poc/TECHNICAL_REVIEW.md), the PoC report does **NOT** constitute proof of local LLM quality (H4), LLM latency/throughput (H5), fuzzy deduplication (H6), or recommendation utility (H7) until a manually labeled evaluation dataset is executed.
+> **PoC Technical Review Note**: The initial PoC proved end-to-end data flow (ingestion, raw storage, canonical schema mapping, DuckDB analytics). Per [TECHNICAL_REVIEW.md](poc/TECHNICAL_REVIEW.md), local LLM quality, fuzzy deduplication, and recommendations remain explicitly planned for future epochs (Épocas 5–8).
 
 ---
 
@@ -38,7 +32,7 @@ integrity verification, and retention/backup controls satisfy the roadmap accept
 - **Linux OS**
 - **Python**: $\ge 3.12.3$
 - **uv**: Python package and environment manager
-- **Ollama** (Optional): Local LLM inference server. (Note: Installed model on local host: `gemma4:26b`)
+- **Ollama** (Optional): Local LLM inference server (Installed model on local host: `gemma4:26b`)
 
 ---
 
@@ -67,7 +61,7 @@ integrity verification, and retention/backup controls satisfy the roadmap accept
 ## 4. Execution & Diagnostics
 
 ### Application CLI Commands
-You can run the application using the `radar-vagas` command or `uv run radar-vagas`:
+You can run the application using `radar-vagas` or `uv run radar-vagas`:
 
 - **Display Application Configuration**:
   ```bash
@@ -78,18 +72,15 @@ You can run the application using the `radar-vagas` command or `uv run radar-vag
   ```bash
   uv run radar-vagas doctor
   ```
-  *(Or `uv run radar-vagas check-llm`)*
 
 - **List Registered Data Sources**:
   ```bash
-  uv run radar-vagas sources
   uv run radar-vagas sources --active-only
   ```
 
 - **Collect a bounded sample**:
   ```bash
-  uv run radar-vagas collect --limit 10 --per-source-limit 5
-  uv run radar-vagas collect --source remotive --limit 5 --dry-run
+  uv run radar-vagas collect --limit 50 --per-source-limit 25 --scheduling-quantum 10
   ```
 
 - **Inspect a persisted run**:
@@ -97,64 +88,46 @@ You can run the application using the `radar-vagas` command or `uv run radar-vag
   uv run radar-vagas runs show <run-id>
   ```
 
-- **Manage historical data (Import, Init, Stats, Verify, Replay)**:
+- **Manage Historical Storage (Import, Stats, Verify, Replay, Clean, Backup, Restore, Prune)**:
   ```bash
+  # Initialize and import local runs into DuckDB + CAS
   uv run radar-vagas history init --db-path data/radar_vagas.db
   uv run radar-vagas history import --output-dir data --db-path data/radar_vagas.db
   uv run radar-vagas history stats --db-path data/radar_vagas.db
   uv run radar-vagas history verify --db-path data/radar_vagas.db
   uv run radar-vagas history replay <run-id> --db-path data/radar_vagas.db --limit 10 --jsonl
+
+  # Clean HTML source text into plain text
+  uv run radar-vagas history clean --db-path data/radar_vagas.db
+
+  # Backup historical storage to an atomic snapshot
+  uv run radar-vagas history backup --dest-dir backups/snapshot_1 --db-path data/radar_vagas.db
+
+  # Restore historical storage from a backup
+  uv run radar-vagas history restore --backup-dir backups/snapshot_1 --target-dir restored_data --force
+
+  # Preview data retention pruning (dry-run)
+  uv run radar-vagas history prune --max-age-days 30 --keep-min-runs 5
+
+  # Execute retention pruning
+  uv run radar-vagas history prune --max-age-days 30 --keep-min-runs 5 --force
+
+  # Reprocess records from historical quarantine
+  uv run radar-vagas history reprocess-quarantine --db-path data/radar_vagas.db
   ```
 
-The `doctor` command inspects whether the Ollama HTTP daemon is reachable and whether the configured model is installed locally. If Ollama is offline, it outputs a clear explanatory status message without crashing.
-
 ---
 
-## 5. Source Catalog & Adding New Sources
-
-Job data sources are configured as TOML files in the `catalogs/` directory. Each file defines one or more sources using the `[[sources]]` array-of-tables syntax.
-
-### Example: Adding a new Greenhouse board
-
-Create or edit `catalogs/greenhouse.toml`:
-
-```toml
-[[sources]]
-name = "greenhouse_mycompany"
-source_type = "ats_greenhouse"
-base_url = "https://boards-api.greenhouse.io/v1/boards"
-board_identifier = "mycompany"
-active = true
-request_timeout = 15.0
-rate_limit_delay = 1.0
-description = "My Company Greenhouse board"
-```
-
-### Supported Source Types
-
-| Source Type       | Connector          | Required Field        |
-|-------------------|--------------------|-----------------------|
-| `aggregator_api`  | Remotive/Arbeitnow | —                     |
-| `ats_greenhouse`  | Greenhouse         | `board_identifier`    |
-| `ats_lever`       | Lever              | `company_identifier`  |
-
-After adding a source, verify it appears in the catalog:
-```bash
-uv run radar-vagas sources
-```
-
----
-
-## 6. Developer Quality Tools (Test, Lint, Format)
+## 5. Developer Quality Tools (Test, Lint, Format)
 
 All development commands are accessible via `make` shortcuts:
 
-- **Run Automated Tests**:
+- **Run Automated Test Suite (119 passing tests)**:
   ```bash
   make test
   # or: uv run pytest
   ```
-  *(Note: Unit tests run 100% offline and do not require network or an active Ollama daemon)*
+  *(Note: Unit tests run 100% offline without network or Ollama dependencies)*
 
 - **Run Linter (Ruff)**:
   ```bash
@@ -170,18 +143,7 @@ All development commands are accessible via `make` shortcuts:
 
 ---
 
-## 7. Experimental PoC Execution (Optional)
-
-The experimental PoC code remains preserved inside `poc/` for sandbox testing and reference:
-
-```bash
-make run-poc
-# or: uv run python poc/run_poc.py
-```
-
----
-
-## 8. Directory Structure
+## 6. Directory Structure
 
 ```text
 Radar-Vagas/
@@ -189,54 +151,31 @@ Radar-Vagas/
 ├── Makefile                    # Developer shortcut commands
 ├── README.md                   # System documentation and setup guide
 ├── .env.example                # Environment configuration template
-├── catalogs/                   # TOML source catalog files
+├── .github/workflows/ci.yml    # GitHub Actions CI workflow
+├── catalogs/                   # TOML source catalog files with governance metadata
 │   ├── aggregators.toml        # Remotive, Arbeitnow
 │   ├── greenhouse.toml         # Greenhouse ATS boards
 │   └── lever.toml              # Lever ATS companies
-├── docs/                       # Project specifications & architecture
+├── docs/                       # Project specifications & reports
 │   ├── AGENTS.md
 │   ├── Epochs.md
 │   ├── POC.md
-│   └── ARCHITECTURE.md
+│   ├── ARCHITECTURE.md
+│   └── EPOCH4_REPORT.md
 ├── src/
 │   └── radar_vagas/
 │       ├── __init__.py         # Package version
 │       ├── cli.py              # Application CLI Entrypoint
-│       ├── core/               # Configuration & Logging
-│       │   └── history_service.py # Legacy import and offline replay service
-│       ├── domain/             # Domain Models, Schemas & Connector Protocol
-│       │   ├── models.py       # CanonicalJob, SourceConfig, ConnectorResult, etc.
-│       │   └── connector.py    # JobConnector Protocol (structural interface)
+│       ├── core/               # Configuration, Logging, Ingestion & Services
+│       │   ├── cleaner.py      # TextCleaner service for deterministic HTML stripping
+│       │   ├── history_service.py # Historical operations & backup/restore orchestration
+│       │   └── ingestion.py    # ConnectorRunner with scheduling quantum
+│       ├── domain/             # Domain Models & Connector Protocols
+│       │   ├── models.py       # RawJobRecord, CleanedSourceText, BackupManifest, etc.
+│       │   └── connector.py    # JobConnector Protocol
 │       ├── connectors/         # Production connector implementations
-│       │   ├── remotive.py     # Remotive aggregator API
-│       │   ├── arbeitnow.py    # Arbeitnow aggregator API
-│       │   ├── greenhouse.py   # Greenhouse ATS Board API
-│       │   └── lever.py        # Lever ATS Postings API
-│       ├── sources/            # Source catalog & connector registry
-│       │   ├── catalog.py      # TOML catalog loader
-│       │   └── registry.py     # SourceType → Connector factory registry
-│       └── infrastructure/     # External Services & HTTP Policies
-│           ├── history.py      # DuckDB metadata and SHA-256 blob storage
-│           ├── http.py         # HttpPolicy, polite_get, retry/backoff
-│           └── llm/
-│               └── ollama_client.py
-├── poc/                        # Experimental PoC scripts (sandbox)
-│   ├── TECHNICAL_REVIEW.md
-│   ├── connectors/
-│   ├── data/
-│   └── run_poc.py
-└── tests/                      # Offline unit and integration-style test suite
+│       └── infrastructure/     # DuckDB Storage & HTTP Policies
+│           ├── history.py      # HistoricalStorage (DuckDB + CAS + Migrations + Backup)
+│           └── http.py         # HttpPolicy, polite_get, retry/backoff
+└── tests/                      # 100% offline test suite (119 passing tests)
 ```
-
----
-
-## 9. Current Limitations & Heuristic vs. LLM Distinction
-
-- **Heuristic Engine vs. LLM**: The PoC uses deterministic rules for some extraction and classification tasks. These rules do not generate new prose, but can still produce false positives and false negatives and require evaluation against labeled data.
-- **LLM Inference**: LLM enrichment via Ollama is optional and deferred. LLM quality, latency percentiles, and structured extraction precision will be formally evaluated in future epics using labeled ground-truth fixtures per [TECHNICAL_REVIEW.md](poc/TECHNICAL_REVIEW.md).
-- **Historical storage is an Época 4 foundation**: cross-run observations, `first_seen`,
-  `last_seen`, conservative closure detection, schema migrations, and offline replay are
-  implemented. Cleaned-text storage, normalized-record linkage, filesystem-complete integrity
-  verification, retention controls, and tested backup/restore remain pending.
-- **Relevance is exploratory**: the current regex is intentionally broad and must not be read as
-  a validated count of suitable Data/AI roles.

@@ -44,3 +44,18 @@ def test_future_database_version(tmp_path: Path):
 
     with pytest.raises(RuntimeError, match="newer than supported"):
         HistoricalStorage(tmp_path)
+
+
+def test_migration_tampering_raises_error(tmp_path: Path):
+    from radar_vagas.infrastructure.history import MigrationTamperedError
+
+    storage = HistoricalStorage(tmp_path)
+    storage.close()
+
+    # Manually tamper with an applied migration checksum in DB
+    conn = duckdb.connect(str(tmp_path / "db" / "history.duckdb"))
+    conn.execute("UPDATE schema_migrations SET checksum = 'tampered_checksum' WHERE version = 1")
+    conn.close()
+
+    with pytest.raises(MigrationTamperedError, match="has been modified"):
+        HistoricalStorage(tmp_path)

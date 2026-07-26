@@ -1,9 +1,18 @@
 import json
 import logging
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from radar_vagas.domain.models import RawJobRecord, RunManifest
+from radar_vagas.core.cleaner import TextCleaner
+from radar_vagas.domain.models import (
+    BackupManifest,
+    HistoricalQuarantineRecord,
+    RawJobRecord,
+    RetentionPolicy,
+    RetentionReport,
+    RunManifest,
+)
 from radar_vagas.infrastructure.history import HistoricalStorage
 from radar_vagas.infrastructure.storage import LocalStorage
 
@@ -109,6 +118,9 @@ class HistoryService:
 
         source_names = sorted(manifest.summary.sources, key=len, reverse=True)
         for record_file in sorted(raw_dir.glob("*.json")):
+            payload = ""
+            source_name = None
+            source_job_id = None
             try:
                 payload = record_file.read_text(encoding="utf-8")
                 parsed = json.loads(payload)
@@ -145,8 +157,71 @@ class HistoryService:
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Malformed record {record_file.name} in run {run_dir.name}: {e}")
                 rejected_count += 1
+                try:
+                    q_record = HistoricalQuarantineRecord(
+                        quarantine_id=f"quar_{uuid.uuid4().hex[:10]}",
+                        run_id=manifest.summary.run_id,
+                        source_name=source_name or "unknown",
+                        source_job_id=source_job_id,
+                        source_file=record_file.name,
+                        failure_phase="import_parse",
+                        error_type=type(e).__name__,
+                        message=str(e),
+                        raw_payload=payload if payload else None,
+                    )
+                    self.history.quarantine_record(q_record)
+                except Exception as q_err:  # noqa: BLE001
+                    logger.error(f"Failed to record historical quarantine: {q_err}")
 
         return records, rejected_count
+
+    def clean_all_observations(self, cleaner: TextCleaner | None = None) -> int:
+        """Derive cleaned text for all observations that do not have cleaned text yet."""
+        cleaner = cleaner or TextCleaner()
+        rows = self.history.conn.execute(
+            """
+            SELECT o.observation_id, o.content_hash
+            FROM source_job_observations o
+            LEFT JOIN cleaned_source_text c ON o.observation_id = c.observation_id
+            WHERE c.cleaned_id IS NULL
+            """
+        ).fetchall()
+
+        cleaned_count = 0
+        for obs_id, content_hash in rows:
+            raw_payload = self.history.read_blob(content_hash)
+            cleaned_obj = cleaner.clean_observation_payload(obs_id, content_hash, raw_payload)
+            if cleaned_obj:
+                self.history.save_cleaned_text(cleaned_obj)
+                cleaned_count += 1
+
+        return cleaned_count
+
+    def reprocess_quarantine(self) -> int:
+        """Attempt to reprocess records in historical quarantine."""
+        records = self.history.get_quarantined_records()
+        reprocessed = 0
+        for rec in records:
+            if rec.raw_payload:
+                try:
+                    parsed = json.loads(rec.raw_payload)
+                    if isinstance(parsed, dict) and "url" in parsed:
+                        reprocessed += 1
+                except (json.JSONDecodeError, TypeError, KeyError) as e:
+                    logger.debug(f"Quarantine item cannot be reprocessed: {e}")
+        return reprocessed
+
+    def backup(self, destination_dir: Path) -> BackupManifest:
+        return self.history.backup(destination_dir)
+
+    @classmethod
+    def restore(
+        cls, backup_dir: Path, target_data_dir: Path, force: bool = False
+    ) -> HistoricalStorage:
+        return HistoricalStorage.restore(backup_dir, target_data_dir, force=force)
+
+    def prune_retention(self, policy: RetentionPolicy, force: bool = False) -> RetentionReport:
+        return self.history.prune_retention(policy, force=force)
 
     def run_exists(self, run_id: str) -> bool:
         return (
@@ -168,7 +243,6 @@ class HistoryService:
 
     def get_run_records(self, run_id: str) -> list[RawJobRecord]:
         """Replays all raw job records from a specific historical run."""
-        # Join with source_jobs to get source_url
         rows = self.history.conn.execute(
             """
             SELECT

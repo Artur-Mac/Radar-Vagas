@@ -134,6 +134,51 @@ def main(args: list[str] | None = None) -> int:
     )
     history_verify.add_argument("--db-path", type=str, help="Path to DuckDB database")
 
+    history_backup = history_subparsers.add_parser(
+        "backup", help="Create an atomic snapshot backup of history DB and blobs"
+    )
+    history_backup.add_argument(
+        "--dest-dir", type=str, required=True, help="Destination directory for backup snapshot"
+    )
+    history_backup.add_argument("--db-path", type=str, help="Path to DuckDB database")
+
+    history_restore = history_subparsers.add_parser(
+        "restore", help="Restore history DB and blobs from a backup snapshot"
+    )
+    history_restore.add_argument(
+        "--backup-dir", type=str, required=True, help="Directory containing backup snapshot"
+    )
+    history_restore.add_argument(
+        "--target-dir", type=str, default="data", help="Target data directory (default: data/)"
+    )
+    history_restore.add_argument(
+        "--force", action="store_true", help="Overwrite target directory if non-empty"
+    )
+    history_restore.add_argument("--db-path", type=str, help="Path to DuckDB database")
+
+    history_clean = history_subparsers.add_parser(
+        "clean", help="Derive versioned cleaned source text for observations"
+    )
+    history_clean.add_argument("--db-path", type=str, help="Path to DuckDB database")
+
+    history_prune = history_subparsers.add_parser(
+        "prune", help="Preview or execute retention pruning"
+    )
+    history_prune.add_argument("--max-age-days", type=int, help="Maximum age of runs in days")
+    history_prune.add_argument(
+        "--keep-min-runs", type=int, default=5, help="Minimum number of latest runs to keep"
+    )
+    history_prune.add_argument(
+        "--force", action="store_true", help="Execute deletion (default is preview mode)"
+    )
+    history_prune.add_argument("--db-path", type=str, help="Path to DuckDB database")
+
+    history_req = history_subparsers.add_parser(
+        "reprocess-quarantine",
+        help="Attempt to reprocess records from historical quarantine",
+    )
+    history_req.add_argument("--db-path", type=str, help="Path to DuckDB database")
+
     parsed_args = parser.parse_args(args)
 
     settings = get_settings()
@@ -324,12 +369,14 @@ def main(args: list[str] | None = None) -> int:
         from radar_vagas.infrastructure.history import HistoricalStorage
         from radar_vagas.infrastructure.storage import LocalStorage
 
-        db_path = parsed_args.db_path or settings.db_path
+        db_path_str = parsed_args.db_path or settings.db_path
+        db_path = Path(db_path_str)
+        data_dir = db_path.parent.parent if db_path.parent.name == "db" else db_path.parent
 
         if parsed_args.history_command == "import":
             output_dir = Path(parsed_args.output_dir)
             storage = LocalStorage(output_dir)
-            history = HistoricalStorage(Path(db_path).parent, db_path=Path(db_path))
+            history = HistoricalStorage(data_dir, db_path=db_path)
             service = HistoryService(storage, history)
 
             print(f"📦 Importing runs from {storage.runs_dir} into historical storage...")
@@ -365,7 +412,7 @@ def main(args: list[str] | None = None) -> int:
             return 0
 
         if parsed_args.history_command == "replay":
-            history = HistoricalStorage(Path(db_path).parent, db_path=Path(db_path))
+            history = HistoricalStorage(data_dir, db_path=db_path)
             service = HistoryService(LocalStorage(Path("data")), history)
 
             run_exists = service.run_exists(parsed_args.run_id)
@@ -403,13 +450,13 @@ def main(args: list[str] | None = None) -> int:
             return 0
 
         if parsed_args.history_command == "init":
-            history = HistoricalStorage(Path(db_path).parent, db_path=Path(db_path))
+            history = HistoricalStorage(data_dir, db_path=db_path)
             print(f"✅ Historical storage initialized at {history.db_path}")
             history.close()
             return 0
 
         if parsed_args.history_command == "stats":
-            history = HistoricalStorage(Path(db_path).parent, db_path=Path(db_path))
+            history = HistoricalStorage(data_dir, db_path=db_path)
             runs = history.conn.execute("SELECT COUNT(*) FROM ingestion_runs").fetchone()[0]
             jobs = history.conn.execute("SELECT COUNT(*) FROM source_jobs").fetchone()[0]
             obs = history.conn.execute("SELECT COUNT(*) FROM source_job_observations").fetchone()[0]
@@ -427,7 +474,7 @@ def main(args: list[str] | None = None) -> int:
             return 0
 
         if parsed_args.history_command == "verify":
-            history = HistoricalStorage(Path(db_path).parent, db_path=Path(db_path))
+            history = HistoricalStorage(data_dir, db_path=db_path)
             report = history.verify_integrity()
             history.close()
 
@@ -435,15 +482,95 @@ def main(args: list[str] | None = None) -> int:
             print("🔍 HISTORICAL STORAGE VERIFICATION")
             print("=" * 60)
             print(f"  Database Blobs:       {report.total_database_blobs}")
-            print(f"  Missing Files:        {len(report.missing_files)}")
-            print(f"  Corrupt Files:        {len(report.corrupt_files)}")
+            print(f"  Missing Blobs:        {len(report.missing_files)}")
+            print(f"  Corrupt Blobs:        {len(report.corrupt_files)}")
             print(f"  Missing Metadata:     {len(report.missing_metadata)}")
-            print(f"  Orphan DB Blobs:      {len(report.orphan_database_blobs)}")
-            print(f"  Orphan Files:         {len(report.orphan_files)}")
-            print(f"  Invalid Blob Paths:   {len(report.invalid_blob_paths)}")
+            print(f"  Orphan Blobs (DB):    {len(report.orphan_database_blobs)}")
+            print(f"  Orphan Blobs (FS):    {len(report.orphan_files)}")
+            print(f"  Invalid Paths:        {len(report.invalid_blob_paths)}")
+            status = "🟢 VALID" if report.is_valid else "🔴 INVALID"
+            print(f"  Status:               {status}")
             print("=" * 60 + "\n")
-
             return 0 if report.is_valid else 1
+
+        if parsed_args.history_command == "backup":
+            dest_dir = Path(parsed_args.dest_dir)
+            with HistoricalStorage(data_dir, db_path=db_path) as history:
+                service = HistoryService(LocalStorage(Path("data")), history)
+                manifest = service.backup(dest_dir)
+
+            print("\n" + "=" * 60)
+            print("💾 BACKUP COMPLETED")
+            print("=" * 60)
+            print(f"  Backup ID:        {manifest.backup_id}")
+            print(f"  Destination:      {dest_dir}")
+            print(f"  DB Checksum:      {manifest.db_checksum[:16]}...")
+            print(f"  Total Blobs:      {manifest.total_blobs}")
+            print(f"  Total Bytes:      {manifest.total_bytes}")
+            print("=" * 60 + "\n")
+            return 0
+
+        if parsed_args.history_command == "restore":
+            backup_dir = Path(parsed_args.backup_dir)
+            target_dir = Path(parsed_args.target_dir)
+
+            try:
+                storage = HistoryService.restore(
+                    backup_dir=backup_dir, target_data_dir=target_dir, force=parsed_args.force
+                )
+                storage.close()
+                print("\n" + "=" * 60)
+                print("♻️ RESTORE COMPLETED & VERIFIED")
+                print("=" * 60)
+                print(f"  Source Backup:    {backup_dir}")
+                print(f"  Target Data Dir:  {target_dir}")
+                print("=" * 60 + "\n")
+                return 0
+            except Exception as e:  # noqa: BLE001
+                print(f"❌ Restore failed: {e}")
+                return 1
+
+        if parsed_args.history_command == "clean":
+            with HistoricalStorage(data_dir, db_path=db_path) as history:
+                service = HistoryService(LocalStorage(Path("data")), history)
+                count = service.clean_all_observations()
+
+            print(f"✨ Cleaned and versioned {count} observation(s).")
+            return 0
+
+        if parsed_args.history_command == "prune":
+            from radar_vagas.domain.models import RetentionPolicy
+
+            policy = RetentionPolicy(
+                active=True,
+                max_age_days=parsed_args.max_age_days,
+                keep_minimum_runs=parsed_args.keep_min_runs,
+            )
+
+            with HistoricalStorage(data_dir, db_path=db_path) as history:
+                service = HistoryService(LocalStorage(Path("data")), history)
+                report = service.prune_retention(policy, force=parsed_args.force)
+
+            mode_str = "PREVIEW (DRY-RUN)" if report.preview_only else "DESTRUCTIVE EXECUTION"
+            print("\n" + "=" * 60)
+            print(f"🧹 RETENTION PRUNING [{mode_str}]")
+            print("=" * 60)
+            print(f"  Pruned Runs:          {report.pruned_runs}")
+            print(f"  Pruned Observations:  {report.pruned_observations}")
+            print(f"  Pruned Blobs:         {report.pruned_blobs}")
+            print(f"  Freed Bytes:          {report.freed_bytes}")
+            if report.preview_only:
+                print("  Note: No data was modified. Use --force to execute deletion.")
+            print("=" * 60 + "\n")
+            return 0
+
+        if parsed_args.history_command == "reprocess-quarantine":
+            with HistoricalStorage(data_dir, db_path=db_path) as history:
+                service = HistoryService(LocalStorage(Path("data")), history)
+                count = service.reprocess_quarantine()
+
+            print(f"🔄 Reprocessed {count} quarantined record(s).")
+            return 0
 
     parser.print_help()
     return 0

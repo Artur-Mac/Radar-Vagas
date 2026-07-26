@@ -264,9 +264,86 @@ class IngestionSummary(BaseModel):
 
 
 class RunManifest(BaseModel):
-    """Full manifest of a completed run, written to disk."""
+    """Root container manifest for an ingestion run."""
 
     summary: IngestionSummary
-    rejected: list[RejectedRecord] = Field(default_factory=list)
     quarantined: list[QuarantinedRecord] = Field(default_factory=list)
+    rejected: list[RejectedRecord] = Field(default_factory=list)
     duplicates: list[ExactDuplicate] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Derived & Hardening Models (Epoch 4)
+# ---------------------------------------------------------------------------
+
+
+class CleanedSourceText(BaseModel):
+    """Derived cleaned text artifact linked to a specific observation."""
+
+    cleaned_id: str
+    observation_id: str
+    raw_content_hash: str
+    transformation_name: str = "default_html_cleaner"
+    transformation_version: str = "0.1.0"
+    cleaned_text: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class HistoricalQuarantineRecord(BaseModel):
+    """Structured record stored in historical quarantine."""
+
+    quarantine_id: str
+    run_id: str
+    source_name: str
+    source_job_id: str | None = None
+    source_file: str | None = None
+    failure_phase: str
+    error_type: str
+    message: str
+    raw_content_hash: str | None = None
+    raw_payload: str | None = None
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class BackupManifest(BaseModel):
+    """Metadata describing a historical storage backup snapshot."""
+
+    backup_id: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    application_version: str
+    schema_version: int
+    db_checksum: str
+    total_blobs: int
+    total_bytes: int
+
+
+class RetentionPolicy(BaseModel):
+    """Configuration for historical data retention and pruning."""
+
+    active: bool = False
+    max_age_days: int | None = None
+    keep_minimum_runs: int = 5
+
+
+class RetentionReport(BaseModel):
+    """Summary of data pruned by a retention execution."""
+
+    preview_only: bool
+    pruned_runs: int = 0
+    pruned_observations: int = 0
+    pruned_blobs: int = 0
+    freed_bytes: int = 0
+    recoverable: bool = False
+
+
+class NormalizedJobLink(BaseModel):
+    """Stable boundary contract linking Epoch 5 normalized entities to raw observations."""
+
+    normalized_job_id: str
+    source_name: str
+    source_job_id: str
+    observation_id: str
+    raw_content_hash: str
+    cleaned_id: str | None = None
+    schema_version: str = "1.0.0"
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

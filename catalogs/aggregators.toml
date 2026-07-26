@@ -7,6 +7,9 @@ active = true
 request_timeout = 15.0
 rate_limit_delay = 1.0
 description = "Remotive remote job aggregator API"
+access_type = "public"
+authentication_required = false
+terms_url = "https://remotive.com/terms"
 
 [[sources]]
 name = "arbeitnow"
@@ -17,3 +20,6 @@ active = true
 request_timeout = 15.0
 rate_limit_delay = 1.0
 description = "Arbeitnow job board aggregator API"
+access_type = "public"
+authentication_required = false
+terms_url = "https://www.arbeitnow.com/terms"

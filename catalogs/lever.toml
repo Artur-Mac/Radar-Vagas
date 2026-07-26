@@ -8,6 +8,8 @@ active = true
 request_timeout = 15.0
 rate_limit_delay = 1.0
 description = "Spotify Lever postings"
+access_type = "public"
+authentication_required = false
 
 [[sources]]
 name = "lever_netflix"
@@ -19,6 +21,8 @@ active = true
 request_timeout = 15.0
 rate_limit_delay = 1.0
 description = "Netflix Lever postings"
+access_type = "public"
+authentication_required = false
 
 [[sources]]
 name = "lever_palantir"
@@ -30,6 +34,8 @@ active = true
 request_timeout = 15.0
 rate_limit_delay = 1.0
 description = "Palantir Lever postings"
+access_type = "public"
+authentication_required = false
 
 [[sources]]
 name = "lever_plaid"
@@ -41,3 +47,5 @@ active = true
 request_timeout = 15.0
 rate_limit_delay = 1.0
 description = "Plaid Lever postings"
+access_type = "public"
+authentication_required = false

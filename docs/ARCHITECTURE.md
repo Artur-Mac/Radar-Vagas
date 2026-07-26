@@ -1,39 +1,43 @@
-# Radar-Vagas Architecture Document (Época 4 hardening)
+# Radar-Vagas Architecture Document (Época 4 Completed)
 
 ## 1. Overview
 
-**Radar-Vagas** is a local-first job market intelligence platform. Época 3 added a
-run-scoped ingestion service and local raw storage. The current Época 4 layer provides
-cross-run observations in DuckDB, robust content-addressed raw blobs, schema migrations,
-and fair ingestion scheduling, while preserving offline operation.
+**Radar-Vagas** is a local-first job market intelligence platform. Épocas 1–3 built the connector framework, multi-source ingestion service, and local run storage. **Época 4 (Raw Data and Historical Storage)** provides a fully hardened, observable, and reproducible storage layer backed by DuckDB metadata, Content-Addressed Storage (CAS) SHA-256 payload blobs, versioned HTML/text cleaning, atomic snapshot backup/restore, retention pruning, and migration tampering protection.
+
+---
 
 ## 2. Directory Layout & Layer Separation
 
 ```text
 Radar-Vagas/
 ├── pyproject.toml              # Dependencies, build configs, CLI script entrypoint
-├── Makefile                    # Developer shortcut commands (make setup, test, lint, format, doctor, sources)
-├── README.md                   # System documentation and execution guide
-├── .env.example                # Configuration template with default non-secret values
-├── catalogs/                   # TOML source catalog files (versionable configuration)
+├── Makefile                    # Developer shortcut commands
+├── README.md                   # System documentation and setup guide
+├── .env.example                # Environment configuration template
+├── .github/workflows/ci.yml    # GitHub Actions CI workflow
+├── catalogs/                   # TOML source catalog files with governance metadata
 │   ├── aggregators.toml        # Remotive, Arbeitnow
 │   ├── greenhouse.toml         # Greenhouse ATS boards
 │   └── lever.toml              # Lever ATS companies
-├── docs/                       # Project specifications and architecture docs
+├── docs/                       # Project specifications & architecture reports
 │   ├── AGENTS.md
 │   ├── Epochs.md
 │   ├── POC.md
-│   └── ARCHITECTURE.md
+│   ├── ARCHITECTURE.md
+│   └── EPOCH4_REPORT.md
 ├── src/
 │   └── radar_vagas/
 │       ├── __init__.py         # Package version export
-│       ├── cli.py              # CLI entry point (radar-vagas doctor, info, sources)
-│       ├── core/               # Configuration, logging, ingestion, and history services
+│       ├── cli.py              # CLI entry point (info, doctor, sources, collect, runs, history)
+│       ├── core/               # Configuration, logging, ingestion, and services
+│       │   ├── cleaner.py      # TextCleaner service for deterministic HTML tag stripping
+│       │   ├── history_service.py # High-level historical service & backup/restore orchestration
+│       │   ├── ingestion.py    # ConnectorRunner with scheduling quantum
 │       │   ├── config.py       # Typed Settings (pydantic-settings)
 │       │   └── logging.py      # Standardized logging formatter
 │       ├── domain/             # Core Entities, Schemas & Protocols
-│       │   ├── models.py       # CanonicalJob, RawJobRecord, SourceConfig, ConnectorResult, etc.
-│       │   └── connector.py    # JobConnector Protocol (structural interface)
+│       │   ├── models.py       # RawJobRecord, CleanedSourceText, BackupManifest, RetentionPolicy, etc.
+│       │   └── connector.py    # JobConnector Protocol
 │       ├── connectors/         # Production connector implementations
 │       │   ├── remotive.py     # Remotive aggregator API connector
 │       │   ├── arbeitnow.py    # Arbeitnow aggregator API connector
@@ -43,130 +47,86 @@ Radar-Vagas/
 │       │   ├── catalog.py      # TOML catalog loader and filter utilities
 │       │   └── registry.py     # SourceType → ConnectorFactory registry
 │       └── infrastructure/     # External Clients & Infrastructure Interfaces
-│           ├── history.py      # DuckDB metadata and SHA-256 content-addressed storage
+│           ├── history.py      # DuckDB storage, CAS SHA-256 blobs, migrations, backup & prune
 │           ├── http.py         # HttpPolicy, polite_get, retry/backoff
 │           └── llm/
-│               └── ollama_client.py  # Ollama service diagnostics
-├── poc/                        # Isolated experimental PoC scripts & exploratory code
-└── tests/                      # Automated offline test suite
+│               └── ollama_client.py # Ollama service diagnostics
+├── poc/                        # Isolated experimental PoC scripts
+└── tests/                      # 100% offline test suite (119 passing tests)
 ```
+
+---
 
 ## 3. Core Architectural Decisions
 
 ### 3.1 Local-First & Zero-Cost Dependency
 - The application runs entirely on the developer's local machine (Linux).
-- All unit tests and core pipeline routines must pass offline without requiring active internet connectivity or an active Ollama server.
+- All unit tests and core pipeline routines pass 100% offline without requiring internet access or active LLM daemons.
 
-### 3.2 LLM Strategy (Deferred Requirement)
-- Local LLM inference via Ollama is supported as an optional enrichment layer.
-- Absence or offline status of Ollama is handled gracefully via `radar-vagas doctor` and deterministic fallback rules.
-- Deterministic heuristic parsing avoids generative output and GPU requirements, but can still produce false positives and false negatives.
-
-### 3.3 Raw Payload Preservation
+### 3.2 Raw Payload Preservation & Content-Addressed Storage (CAS)
 - Ingestion connectors save 100% of raw JSON payloads.
-- Re-processing and schema migrations can be replayed from local raw storage without making new HTTP requests to source job boards.
+- Raw payloads are stored under a two-tier SHA-256 directory layout: `blobs/sha256/xx/yy/<hash>.json`.
+- Payload writes use atomic temporary files, `fsync`, and hard links to ensure immutability and crash resilience.
 
-### 3.4 Separation Between PoC and Application Core
-- The `poc/` directory remains intact as an exploratory sandbox and learning resource.
-- Functional business logic is migrated incrementally to `src/radar_vagas/` in subsequent epics.
-- No imports from `poc/` are allowed inside `src/radar_vagas/`.
-
-## 4. Connector Framework (Época 2)
-
-### 4.1 Design Principles
-
-The connector framework follows these principles:
-
-1. **Protocol over ABC**: Connectors implement a `JobConnector` Protocol (structural subtyping) for maximum flexibility and testability without inheritance coupling.
-2. **Injected HTTP Client**: Connectors receive an `httpx.Client` at `fetch()` time, enabling centralised HTTP policy and trivial mocking.
-3. **Catalogue-Driven Configuration**: Source definitions live in TOML files (`catalogs/`), not in code. Adding a source is a configuration change, not a code change.
-4. **Failure Isolation**: `ConnectorRunner` records source failures and continues with independent
-   sources. Healthy empty results remain distinct from failed results.
-
-### 4.2 Component Diagram
+### 3.3 Data Layer Provenance & Ownership
 
 ```mermaid
 graph TD
-    TOML["catalogs/*.toml"] -->|parsed by| Catalog["catalog.py"]
-    Catalog -->|produces| SC["list[SourceConfig]"]
-    SC -->|fed to| Registry["ConnectorRegistry"]
-    Registry -->|creates| Connector["JobConnector"]
-    Connector -->|uses| HttpPolicy["HttpPolicy + polite_get"]
-    HttpPolicy -->|wraps| Client["httpx.Client"]
-    Connector -->|produces| Result["ConnectorResult"]
-    Connector -->|normalizes to| Job["CanonicalJob"]
+    Layer1["Layer 1: Raw Observations (CAS Blobs + DuckDB)"] -->|observation_id + raw_content_hash| Layer2["Layer 2: Cleaned Source Text (cleaned_source_text)"]
+    Layer1 -->|raw_content_hash + observation_id| Layer3["Layer 3: Epoch 5 Boundary (NormalizedJobLink)"]
+    Layer2 -->|cleaned_id| Layer3
 ```
 
-### 4.3 Key Types
+1. **Layer 1 (Raw Payload & Observations)**: Owned by `HistoricalStorage` (`source_job_observations`, `raw_blobs`, `ingestion_runs`). Immutable.
+2. **Layer 2 (Derived Cleaned Text)**: Owned by `TextCleaner` (`cleaned_source_text`). Deterministic HTML tag stripping and entity decoding, versioned by `transformation_name` and `transformation_version`.
+3. **Layer 3 (Normalized Boundary Contract)**: Defined by `NormalizedJobLink` in `domain.models`. Links normalized job entities in Epoch 5 back to their raw observation and cleaned text IDs.
 
-| Type | Module | Purpose |
-|------|--------|---------|
-| `SourceType` | `domain.models` | Enum of supported source types |
-| `SourceConfig` | `domain.models` | Pydantic model for TOML source entries |
-| `ConnectorResult` | `domain.models` | Structured fetch execution result |
-| `CollectionError` | `domain.models` | Structured error with source, phase, message |
-| `JobConnector` | `domain.connector` | Protocol interface for all connectors |
-| `HttpPolicy` | `infrastructure.http` | Timeout, retry, backoff configuration |
-| `ConnectorRegistry` | `sources.registry` | Factory registry mapping SourceType → Connector |
+---
 
-### 4.4 HTTP Policy Layer
+## 4. Historical Storage & Governance Engine (Época 4)
 
-All connectors use the centralised `polite_get()` function which provides:
+### 4.1 DuckDB Schema & Sequential Migrations
 
-- **Retry with exponential backoff**: Only for status codes 429, 500, 502, 503 and connection errors.
-- **Configurable timeouts**: Per-source via `SourceConfig.request_timeout`.
-- **Rate limiting**: Configurable delay between requests via `SourceConfig.rate_limit_delay`.
-- **User-Agent identification**: `RadarVagas/0.1`.
-- **Immediate failure on non-retryable errors**: 404, 403, etc. are not retried.
+`HistoricalStorage` manages DuckDB migrations 0 through 11:
+- `schema_migrations`: Version tracking and SHA-256 checksum validation to detect migration tampering (`MigrationTamperedError`).
+- `ingestion_runs`: Global run metrics, timestamps, limits, and application version.
+- `source_runs`: Per-source execution metrics and state (`success`, `partial`, `failed`).
+- `raw_blobs`: Primary key registry of SHA-256 hashes and payload byte sizes.
+- `source_jobs`: Lifecycle metadata (`first_seen_at`, `last_seen_at`, `missing_complete_runs`, `status`).
+- `source_job_observations`: Granular observation instances (`observation_id`, `run_id`, `content_hash`, `observed_at`, `changed_since_previous`).
+- `cleaned_source_text`: Versioned cleaned text linked to `observation_id`.
+- `historical_quarantine`: Structured quarantine logging malformed payload envelopes with failure phase and error messages.
 
-### 4.5 Adding a New Connector
+### 4.2 Backup and Restore Snapshot Strategy
 
-1. Create a new connector class in `src/radar_vagas/connectors/` that satisfies the `JobConnector` protocol.
-2. Add the new `SourceType` value to the `SourceType` enum.
-3. Register the factory in `build_default_registry()`.
-4. Add source entries in `catalogs/`.
+`history backup` creates an atomic, consistent snapshot containing:
+1. `history.duckdb` (checkpointed and copied)
+2. `blobs/sha256/...` (copied directory tree)
+3. `backup_manifest.json` containing backup ID, creation timestamp, schema version, total blob count, total byte size, and database SHA-256 checksum.
 
-## 5. Quality & Testing Standards
+`history restore` safety rules:
+- Fails with `FileExistsError` if the target directory is non-empty, unless `--force` is specified.
+- Automatically verifies database SHA-256 checksum against `backup_manifest.json`.
+- Runs full `verify_integrity()` after restoring to validate filesystem/database parity.
 
-- **Linter & Formatter**: `ruff` (Line length: 100, target Python: 3.12).
-- **Test Framework**: `pytest`. All 51 current tests must pass cleanly.
-- **Offline Testing**: All tests use `httpx.MockTransport` for HTTP mocking. Zero network dependency.
-- **Diagnostics**: `radar-vagas doctor` checks Ollama daemon availability and model installation status.
-- **Source Management**: `radar-vagas sources` lists all registered sources from the TOML catalog.
+### 4.3 Retention & Deletion Safety
 
-## 6. Ingestion and Run Storage (Época 3)
+`history prune` rules:
+- **Preview Mode (Default)**: Dry-run preview calculates eligible runs, observations, orphan blobs, and freed bytes without mutating disk state (`preview_only=True`).
+- **Destructive Mode (`--force`)**: Deletes old runs and observations while strictly respecting `keep_minimum_runs=5`.
+- **Ref-Count Protection**: Raw payload blobs referenced by any remaining observation are preserved; only unreferenced orphan blobs are removed.
 
-`ConnectorRunner` selects active catalog entries, applies global and per-source limits, follows
-connector pagination, validates minimum source identity and URL fields, removes exact duplicates
-within the run, and persists accepted raw payloads through `LocalStorage`.
+### 4.4 Migration Hardening & Recovery Procedures
 
-Each persisted execution writes:
+Every committed migration in `MIGRATIONS` has a computed SHA-256 checksum. When initializing `HistoricalStorage`:
+- If an applied migration in `schema_migrations` has a checksum mismatch with code, a `MigrationTamperedError` is raised immediately.
+- **Recovery Procedure**: If a migration script was accidentally edited after deployment, revert the code change to match the committed migration SQL, or run database recovery by restoring a valid backup snapshot via `radar-vagas history restore`.
 
-```text
-data/runs/<run_id>/
-├── manifest.json
-├── summary.json
-├── raw/
-└── quarantine/
-```
+---
 
-Writes use a temporary file plus an atomic no-overwrite link. `--dry-run` computes the same
-manifest in memory without creating files or directories.
+## 5. Quality & Validation Metrics
 
-## 7. Historical Storage Layer (Época 4 in progress)
-
-`HistoryService` imports both Época 3 payload-only files and newer record envelopes.
-`HistoricalStorage` stores immutable payload bytes under a SHA-256 content-addressed layout and
-keeps runs, source executions, source jobs, and observations in DuckDB. A run import is
-idempotent and its database changes are transactional. Every observation retains the hash,
-source URL, payload media type, and source type needed for deterministic offline replay.
-
-Lifecycle transitions are intentionally conservative: only a source run marked
-`coverage_complete` can increment missing-run counters, and a job is closed after a configured
-threshold of consecutive complete misses. A later observation marks it as reopened.
-The schema applies sequential migrations and records the application version. The CLI includes
-`import`, `replay`, `stats`, `verify`, and `init` commands.
-
-This is not yet the complete Época 4 outcome described in `docs/Epochs.md`: cleaned source text,
-raw-to-normalized linkage, full database/filesystem reconciliation, retention controls, and a
-tested backup/restore procedure are still required.
+- **Test Suite**: 119 passing tests running 100% offline.
+- **Linter & Formatter**: `ruff check .` and `ruff format .` clean.
+- **Git Diff**: `git diff --check` clean.
+- **Performance Budget**: Scale benchmarks verified up to 3,000 synthetic records completing under 5 seconds.

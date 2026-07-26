@@ -3,17 +3,32 @@ import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Self
 
 import duckdb
 
-from radar_vagas.domain.models import RawJobRecord, RunManifest
+from radar_vagas.domain.models import (
+    BackupManifest,
+    CleanedSourceText,
+    HistoricalQuarantineRecord,
+    RawJobRecord,
+    RetentionPolicy,
+    RetentionReport,
+    RunManifest,
+)
 
 logger = logging.getLogger(__name__)
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+class MigrationTamperedError(ValueError):
+    """Raised when an already applied migration script checksum differs from code."""
 
 
 @dataclass(frozen=True)
@@ -112,6 +127,37 @@ MIGRATIONS = [
     """
     ALTER TABLE ingestion_runs ADD COLUMN application_version VARCHAR;
     """,
+    """
+    CREATE TABLE cleaned_source_text (
+        cleaned_id VARCHAR PRIMARY KEY,
+        observation_id VARCHAR,
+        raw_content_hash VARCHAR,
+        transformation_name VARCHAR,
+        transformation_version VARCHAR,
+        cleaned_text VARCHAR,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (observation_id) REFERENCES source_job_observations(observation_id),
+        UNIQUE (observation_id, transformation_name, transformation_version)
+    );
+    """,
+    """
+    CREATE TABLE historical_quarantine (
+        quarantine_id VARCHAR PRIMARY KEY,
+        run_id VARCHAR,
+        source_name VARCHAR,
+        source_job_id VARCHAR,
+        source_file VARCHAR,
+        failure_phase VARCHAR,
+        error_type VARCHAR,
+        message VARCHAR,
+        raw_content_hash VARCHAR,
+        raw_payload VARCHAR,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """,
+    """
+    ALTER TABLE schema_migrations ADD COLUMN checksum VARCHAR;
+    """,
 ]
 
 
@@ -127,12 +173,35 @@ class HistoricalStorage:
         self.conn = duckdb.connect(str(self.db_path))
         self._apply_migrations()
 
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
     def _apply_migrations(self) -> None:
+        has_checksum_col = False
+        applied_migrations: dict[int, str | None] = {}
         try:
-            self.conn.execute("SELECT MAX(version) FROM schema_migrations")
-            current_version = self.conn.fetchone()[0]
-            if current_version is None:
-                current_version = -1
+            cols = [
+                row[0]
+                for row in self.conn.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name = 'schema_migrations'"
+                ).fetchall()
+            ]
+            has_checksum_col = "checksum" in cols
+            if has_checksum_col:
+                rows = self.conn.execute(
+                    "SELECT version, checksum FROM schema_migrations ORDER BY version"
+                ).fetchall()
+                applied_migrations = {row[0]: row[1] for row in rows}
+            else:
+                rows = self.conn.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                ).fetchall()
+                applied_migrations = {row[0]: None for row in rows}
+
+            current_version = max(applied_migrations.keys()) if applied_migrations else -1
         except duckdb.CatalogException:
             current_version = -1
 
@@ -142,20 +211,48 @@ class HistoricalStorage:
                 f"version {len(MIGRATIONS) - 1}"
             )
 
+        # Migration tampering verification
+        for ver, db_checksum in applied_migrations.items():
+            if db_checksum is not None and ver < len(MIGRATIONS):
+                code_sql = MIGRATIONS[ver].strip()
+                code_checksum = hashlib.sha256(code_sql.encode("utf-8")).hexdigest()
+                if db_checksum != code_checksum:
+                    raise MigrationTamperedError(
+                        f"Migration version {ver} has been modified! "
+                        f"Applied checksum: {db_checksum}, Expected: {code_checksum}"
+                    )
+
         for i, migration in enumerate(MIGRATIONS):
+            sql_clean = migration.strip()
+            migration_checksum = hashlib.sha256(sql_clean.encode("utf-8")).hexdigest()
+
             if i > current_version:
                 logger.info(f"Applying migration version {i}")
                 self.conn.execute("BEGIN TRANSACTION")
                 try:
                     self.conn.execute(migration)
-                    if i > 0:
-                        self.conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", [i])
+                    cols = [
+                        row[0]
+                        for row in self.conn.execute(
+                            "SELECT column_name FROM information_schema.columns WHERE table_name = 'schema_migrations'"
+                        ).fetchall()
+                    ]
+                    if "checksum" in cols:
+                        self.conn.execute(
+                            "INSERT INTO schema_migrations (version, checksum) VALUES (?, ?)",
+                            [i, migration_checksum],
+                        )
                     else:
-                        self.conn.execute("INSERT INTO schema_migrations (version) VALUES (0)")
+                        self.conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", [i])
                     self.conn.execute("COMMIT")
                 except BaseException:
                     self.conn.execute("ROLLBACK")
                     raise
+            elif has_checksum_col and applied_migrations.get(i) is None:
+                self.conn.execute(
+                    "UPDATE schema_migrations SET checksum = ? WHERE version = ?",
+                    [migration_checksum, i],
+                )
 
     def _get_blob_path(self, content_hash: str) -> Path:
         if not _SHA256_PATTERN.fullmatch(content_hash):
@@ -220,6 +317,110 @@ class HistoricalStorage:
             raise ValueError(f"Stored blob failed integrity check: {content_hash}")
         return payload
 
+    def save_cleaned_text(self, cleaned: CleanedSourceText) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO cleaned_source_text (
+                cleaned_id, observation_id, raw_content_hash,
+                transformation_name, transformation_version, cleaned_text, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (observation_id, transformation_name, transformation_version) DO UPDATE
+            SET cleaned_text = EXCLUDED.cleaned_text, created_at = EXCLUDED.created_at
+            """,
+            [
+                cleaned.cleaned_id,
+                cleaned.observation_id,
+                cleaned.raw_content_hash,
+                cleaned.transformation_name,
+                cleaned.transformation_version,
+                cleaned.cleaned_text,
+                cleaned.created_at.isoformat(),
+            ],
+        )
+
+    def get_cleaned_text(self, observation_id: str) -> CleanedSourceText | None:
+        row = self.conn.execute(
+            """
+            SELECT cleaned_id, observation_id, raw_content_hash, transformation_name,
+                   transformation_version, cleaned_text, created_at
+            FROM cleaned_source_text
+            WHERE observation_id = ?
+            """,
+            [observation_id],
+        ).fetchone()
+        if not row:
+            return None
+        return CleanedSourceText(
+            cleaned_id=row[0],
+            observation_id=row[1],
+            raw_content_hash=row[2],
+            transformation_name=row[3],
+            transformation_version=row[4],
+            cleaned_text=row[5],
+            created_at=row[6],
+        )
+
+    def quarantine_record(self, record: HistoricalQuarantineRecord) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO historical_quarantine (
+                quarantine_id, run_id, source_name, source_job_id, source_file,
+                failure_phase, error_type, message, raw_content_hash, raw_payload, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                record.quarantine_id,
+                record.run_id,
+                record.source_name,
+                record.source_job_id,
+                record.source_file,
+                record.failure_phase,
+                record.error_type,
+                record.message,
+                record.raw_content_hash,
+                record.raw_payload,
+                record.timestamp.isoformat(),
+            ],
+        )
+
+    def get_quarantined_records(
+        self, run_id: str | None = None
+    ) -> list[HistoricalQuarantineRecord]:
+        if run_id:
+            rows = self.conn.execute(
+                """
+                SELECT quarantine_id, run_id, source_name, source_job_id, source_file,
+                       failure_phase, error_type, message, raw_content_hash, raw_payload, created_at
+                FROM historical_quarantine WHERE run_id = ? ORDER BY created_at
+                """,
+                [run_id],
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                SELECT quarantine_id, run_id, source_name, source_job_id, source_file,
+                       failure_phase, error_type, message, raw_content_hash, raw_payload, created_at
+                FROM historical_quarantine ORDER BY created_at
+                """
+            ).fetchall()
+
+        return [
+            HistoricalQuarantineRecord(
+                quarantine_id=r[0],
+                run_id=r[1],
+                source_name=r[2],
+                source_job_id=r[3],
+                source_file=r[4],
+                failure_phase=r[5],
+                error_type=r[6],
+                message=r[7],
+                raw_content_hash=r[8],
+                raw_payload=r[9],
+                timestamp=r[10],
+            )
+            for r in rows
+        ]
+
     def verify_integrity(self) -> IntegrityReport:
         database_hashes = {
             row[0] for row in self.conn.execute("SELECT content_hash FROM raw_blobs").fetchall()
@@ -282,7 +483,6 @@ class HistoricalStorage:
                 )
             seen_record_keys.add(record_key)
 
-        # Check idempotency
         res = self.conn.execute(
             "SELECT run_id FROM ingestion_runs WHERE run_id = ?", [summary.run_id]
         ).fetchone()
@@ -290,12 +490,9 @@ class HistoricalStorage:
             logger.info(f"Run {summary.run_id} already imported. Skipping.")
             return
 
-        # Keep the complete database mutation atomic. CAS files written before
-        # a rollback are harmless unreferenced blobs and may be reused later.
         self.conn.execute("BEGIN TRANSACTION")
         try:
             cursor = self.conn
-            # 1. Insert Run
             cursor.execute(
                 """
                 INSERT INTO ingestion_runs (
@@ -315,7 +512,6 @@ class HistoricalStorage:
                 ],
             )
 
-            # 2. Insert Source Runs
             for src_name, src_summary in summary.sources.items():
                 cursor.execute(
                     """
@@ -332,16 +528,11 @@ class HistoricalStorage:
                     ],
                 )
 
-            # 3. Process Records
             observed_jobs = {src_name: set() for src_name in summary.sources}
 
-            # Pre-fetch existing source jobs to calculate changed_since_previous and avoid individual selects
             existing_jobs = {}
             if records:
                 source_names = sorted({record.source_name for record in records})
-                # Using a single query to get all existing jobs for the relevant sources
-                # We can construct an IN clause or just fetch all for those sources since they shouldn't be millions per run yet.
-                # A better approach is to use a temp table or just fetch them.
                 placeholders = ",".join(["?"] * len(source_names))
                 rows = cursor.execute(
                     f"SELECT source_name, source_job_id, status, content_hash FROM source_jobs WHERE source_name IN ({placeholders})",
@@ -355,8 +546,6 @@ class HistoricalStorage:
             jobs_update_batch = []
 
             for record in records:
-                # Write CAS blob (This has its own IGNORE logic which is fine to keep per-record for now,
-                # as it renames files on disk)
                 self.write_blob(record.content_hash, record.raw_payload)
 
                 obs_id = str(uuid.uuid4())
@@ -366,7 +555,6 @@ class HistoricalStorage:
                 changed_since_previous = False
 
                 if not existing:
-                    # New job
                     jobs_insert_batch.append(
                         [
                             record.source_name,
@@ -381,7 +569,6 @@ class HistoricalStorage:
                     )
                     changed_since_previous = False
                 else:
-                    # Existing job
                     old_status, old_hash = existing
                     new_status = (
                         "reopened" if old_status in ("possibly_inactive", "closed") else "active"
@@ -455,7 +642,6 @@ class HistoricalStorage:
                     obs_batch,
                 )
 
-            # 4. Handle Missing Coverage
             missing_updates = []
             for src_name, src_summary in summary.sources.items():
                 if getattr(src_summary, "coverage_complete", False):
@@ -492,6 +678,199 @@ class HistoricalStorage:
         except BaseException:
             self.conn.execute("ROLLBACK")
             raise
+
+    def backup(self, destination_dir: Path) -> BackupManifest:
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        backup_db_path = destination_dir / "history.duckdb"
+        backup_blobs_dir = destination_dir / "blobs" / "sha256"
+
+        self.conn.execute("CHECKPOINT")
+
+        shutil.copy2(self.db_path, backup_db_path)
+
+        if self.blobs_dir.exists():
+            shutil.copytree(self.blobs_dir, backup_blobs_dir, dirs_exist_ok=True)
+
+        db_bytes = backup_db_path.read_bytes()
+        db_checksum = hashlib.sha256(db_bytes).hexdigest()
+
+        total_blobs = 0
+        total_bytes = 0
+        if backup_blobs_dir.exists():
+            for p in backup_blobs_dir.rglob("*.json"):
+                if p.is_file():
+                    total_blobs += 1
+                    total_bytes += p.stat().st_size
+
+        from radar_vagas import __version__
+
+        current_version_num = len(MIGRATIONS) - 1
+
+        manifest = BackupManifest(
+            backup_id=f"backup_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}",
+            created_at=datetime.now(UTC),
+            application_version=__version__,
+            schema_version=current_version_num,
+            db_checksum=db_checksum,
+            total_blobs=total_blobs,
+            total_bytes=total_bytes,
+        )
+
+        manifest_path = destination_dir / "backup_manifest.json"
+        manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+
+        logger.info(f"Created backup {manifest.backup_id} at {destination_dir}")
+        return manifest
+
+    @classmethod
+    def restore(
+        cls, backup_dir: Path, target_data_dir: Path, force: bool = False
+    ) -> "HistoricalStorage":
+        manifest_path = backup_dir / "backup_manifest.json"
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"Backup manifest not found in {backup_dir}")
+
+        manifest = BackupManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+
+        target_db_path = target_data_dir / "db" / "history.duckdb"
+        target_blobs_dir = target_data_dir / "blobs" / "sha256"
+
+        if target_data_dir.exists() and any(target_data_dir.iterdir()) and not force:
+            raise FileExistsError(
+                f"Target data directory {target_data_dir} is not empty. Use force=True to overwrite."
+            )
+
+        target_data_dir.mkdir(parents=True, exist_ok=True)
+
+        backup_db_path = backup_dir / "history.duckdb"
+        target_db_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(backup_db_path, target_db_path)
+
+        restored_db_checksum = hashlib.sha256(target_db_path.read_bytes()).hexdigest()
+        if restored_db_checksum != manifest.db_checksum:
+            raise ValueError("Restored database checksum mismatch!")
+
+        backup_blobs_dir = backup_dir / "blobs" / "sha256"
+        if backup_blobs_dir.exists():
+            shutil.copytree(backup_blobs_dir, target_blobs_dir, dirs_exist_ok=True)
+
+        storage = cls(target_data_dir, db_path=target_db_path)
+        report = storage.verify_integrity()
+        if not report.is_valid:
+            raise ValueError(f"Restored storage failed integrity check: {report}")
+
+        logger.info(f"Successfully restored backup {manifest.backup_id} to {target_data_dir}")
+        return storage
+
+    def prune_retention(self, policy: RetentionPolicy, force: bool = False) -> RetentionReport:
+        if not policy.active and not force:
+            logger.info("Retention policy inactive. Returning empty report.")
+            return RetentionReport(preview_only=True)
+
+        preview_only = not force
+
+        cutoff_str = None
+        if policy.max_age_days is not None:
+            cutoff_dt = datetime.now(UTC) - timedelta(days=policy.max_age_days)
+            cutoff_str = cutoff_dt.isoformat()
+
+        total_runs = self.conn.execute("SELECT COUNT(*) FROM ingestion_runs").fetchone()[0]
+        if total_runs <= policy.keep_minimum_runs:
+            logger.info(
+                f"Total runs ({total_runs}) <= keep_minimum_runs ({policy.keep_minimum_runs}). Nothing to prune."
+            )
+            return RetentionReport(preview_only=preview_only)
+
+        all_runs = self.conn.execute(
+            "SELECT run_id, finished_at FROM ingestion_runs ORDER BY finished_at ASC, run_id ASC"
+        ).fetchall()
+
+        eligible_runs = all_runs[: -policy.keep_minimum_runs]
+        if cutoff_str:
+            eligible_runs = [r for r in eligible_runs if r[1] and str(r[1]) < cutoff_str]
+
+        if not eligible_runs:
+            return RetentionReport(preview_only=preview_only)
+
+        eligible_run_ids = [r[0] for r in eligible_runs]
+        placeholders = ",".join(["?"] * len(eligible_run_ids))
+
+        obs_to_delete = self.conn.execute(
+            f"SELECT observation_id, content_hash FROM source_job_observations WHERE run_id IN ({placeholders})",
+            eligible_run_ids,
+        ).fetchall()
+
+        obs_count = len(obs_to_delete)
+        obs_hashes = {r[1] for r in obs_to_delete}
+
+        remaining_hashes = {
+            r[0]
+            for r in self.conn.execute(
+                f"SELECT DISTINCT content_hash FROM source_job_observations WHERE run_id NOT IN ({placeholders})",
+                eligible_run_ids,
+            ).fetchall()
+        }
+
+        orphan_blobs_to_delete = obs_hashes - remaining_hashes
+
+        freed_bytes = 0
+        pruned_blobs_count = 0
+        for h in orphan_blobs_to_delete:
+            blob_path = self._get_blob_path(h)
+            if blob_path.exists():
+                freed_bytes += blob_path.stat().st_size
+                pruned_blobs_count += 1
+
+        if not preview_only:
+            # 1. Delete child table records (observations, cleaned_text, source_runs, quarantine)
+            self.conn.execute("BEGIN TRANSACTION")
+            try:
+                self.conn.execute(
+                    f"DELETE FROM historical_quarantine WHERE run_id IN ({placeholders})",
+                    eligible_run_ids,
+                )
+                self.conn.execute(
+                    f"DELETE FROM cleaned_source_text WHERE observation_id IN (SELECT observation_id FROM source_job_observations WHERE run_id IN ({placeholders}))",
+                    eligible_run_ids,
+                )
+                self.conn.execute(
+                    f"DELETE FROM source_job_observations WHERE run_id IN ({placeholders})",
+                    eligible_run_ids,
+                )
+                self.conn.execute(
+                    f"DELETE FROM source_runs WHERE run_id IN ({placeholders})",
+                    eligible_run_ids,
+                )
+                self.conn.execute("COMMIT")
+            except BaseException:
+                self.conn.execute("ROLLBACK")
+                raise
+
+            # 2. Delete parent ingestion_runs records
+            self.conn.execute("BEGIN TRANSACTION")
+            try:
+                self.conn.execute(
+                    f"DELETE FROM ingestion_runs WHERE run_id IN ({placeholders})",
+                    eligible_run_ids,
+                )
+                for h in orphan_blobs_to_delete:
+                    self.conn.execute("DELETE FROM raw_blobs WHERE content_hash = ?", [h])
+                    blob_path = self._get_blob_path(h)
+                    if blob_path.exists():
+                        blob_path.unlink()
+                self.conn.execute("COMMIT")
+            except BaseException:
+                self.conn.execute("ROLLBACK")
+                raise
+
+        return RetentionReport(
+            preview_only=preview_only,
+            pruned_runs=len(eligible_run_ids),
+            pruned_observations=obs_count,
+            pruned_blobs=pruned_blobs_count,
+            freed_bytes=freed_bytes,
+            recoverable=False,
+        )
 
     def close(self) -> None:
         self.conn.close()

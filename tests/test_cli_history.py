@@ -115,6 +115,6 @@ def test_cli_history_verify(run_dir: Path, capsys):
     assert code == 0
     captured = capsys.readouterr()
     assert "HISTORICAL STORAGE VERIFICATION" in captured.out
-    assert "Missing Files:        0" in captured.out
-    assert "Corrupt Files:        0" in captured.out
-    assert "Orphan Files:         0" in captured.out
+    assert "Missing Blobs:        0" in captured.out
+    assert "Corrupt Blobs:        0" in captured.out
+    assert "Orphan Blobs (FS):    0" in captured.out
