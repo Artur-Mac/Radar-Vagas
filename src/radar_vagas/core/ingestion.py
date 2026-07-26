@@ -52,13 +52,15 @@ class ConnectorRunner:
         *,
         global_limit: int | None = None,
         per_source_limit: int | None = None,
+        persist: bool = True,
     ) -> RunManifest:
         """Execute a full ingestion run across multiple sources."""
         run_id = f"run_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         start_time = time.monotonic()
         started_at = datetime.now(UTC)
 
-        self.storage.ensure_run_dirs(run_id)
+        if persist:
+            self.storage.ensure_run_dirs(run_id)
 
         manifest = RunManifest(
             summary=IngestionSummary(
@@ -102,6 +104,7 @@ class ConnectorRunner:
                 continue
 
             cursor: Pagination | None = None
+            seen_page_urls: set[str] = set()
             source_fetched = 0
             # Track duplicates per source across pagination loops within this run
             source_seen_ids: set[str] = set()
@@ -119,7 +122,7 @@ class ConnectorRunner:
 
                 try:
                     result = connector.fetch(self.client, limit=limit, cursor=cursor)
-                except Exception:
+                except Exception:  # Connector boundary: isolate third-party implementations.
                     logger.exception("Unexpected failure fetching %s", config.name)
                     source_summary.state = RunState.temporary_failure
                     break
@@ -127,9 +130,18 @@ class ConnectorRunner:
                 if result.errors:
                     logger.warning("Connector %s reported errors during fetch.", config.name)
                     source_summary.errors.extend(result.errors)
+                    if result.records:
+                        source_summary.state = RunState.partial
+                    else:
+                        source_summary.state = (
+                            result.state
+                            if result.state
+                            in {RunState.temporary_failure, RunState.permanent_failure}
+                            else RunState.temporary_failure
+                        )
 
                 if not result.records:
-                    if source_fetched == 0:
+                    if source_fetched == 0 and not result.errors:
                         source_summary.state = RunState.empty
                     break
 
@@ -138,7 +150,52 @@ class ConnectorRunner:
                     global_fetched += 1
                     source_summary.records_fetched += 1
 
-                    # 1. Exact Deduplication
+                    # 1. Minimal Validation
+                    rejection_reason = ""
+                    if not record.source_job_id:
+                        rejection_reason = "missing_source_job_id"
+                    elif not record.source_url:
+                        rejection_reason = "missing_source_url"
+                    elif not record.raw_payload:
+                        rejection_reason = "missing_raw_payload"
+
+                    if rejection_reason:
+                        manifest.rejected.append(
+                            RejectedRecord(
+                                source_name=config.name,
+                                source_job_id=record.source_job_id,
+                                reason=rejection_reason,
+                            )
+                        )
+                        source_summary.records_rejected += 1
+                        if persist:
+                            try:
+                                self.storage.save_quarantined_record(
+                                    run_id=run_id,
+                                    source_name=config.name,
+                                    source_job_id=record.source_job_id,
+                                    payload=record.raw_payload,
+                                )
+                            except OSError as exc:
+                                logger.error(
+                                    "Failed to persist rejected record %s: %s",
+                                    record.source_job_id,
+                                    exc,
+                                )
+                                manifest.quarantined.append(
+                                    QuarantinedRecord(
+                                        source_name=config.name,
+                                        source_job_id=record.source_job_id,
+                                        error_type=type(exc).__name__,
+                                        message=str(exc),
+                                        phase="quarantine_persistence",
+                                        raw_payload=record.raw_payload,
+                                    )
+                                )
+                                source_summary.records_quarantined += 1
+                        continue
+
+                    # 2. Exact Deduplication
                     is_duplicate = False
                     reason = ""
                     if record.source_job_id in source_seen_ids:
@@ -162,41 +219,21 @@ class ConnectorRunner:
                     source_seen_ids.add(record.source_job_id)
                     global_seen_hashes.add(record.content_hash)
 
-                    # 2. Minimal Validation
-                    if not record.source_job_id:
-                        manifest.rejected.append(
-                            RejectedRecord(
-                                source_name=config.name,
-                                source_job_id=record.source_job_id,
-                                reason="missing_source_job_id",
-                            )
-                        )
-                        source_summary.records_rejected += 1
-                        continue
-                    if not record.source_url and not record.raw_payload:
-                        manifest.rejected.append(
-                            RejectedRecord(
-                                source_name=config.name,
-                                source_job_id=record.source_job_id,
-                                reason="missing_url_and_payload",
-                            )
-                        )
-                        source_summary.records_rejected += 1
-                        continue
-
                     # 3. Data/AI Relevance Filter
-                    if DATA_AI_REGEX.search(record.raw_payload):
-                        source_summary.records_relevant += 1
+                    is_relevant = bool(DATA_AI_REGEX.search(record.raw_payload))
 
                     # 4. Persistence
                     try:
-                        self.storage.save_raw_record(
-                            run_id=run_id,
-                            source_name=config.name,
-                            source_job_id=record.source_job_id,
-                            payload=record.raw_payload,
-                        )
+                        if persist:
+                            self.storage.save_raw_record(
+                                run_id=run_id,
+                                source_name=config.name,
+                                source_job_id=record.source_job_id,
+                                payload=record.raw_payload,
+                            )
                         source_summary.records_valid += 1
+                        if is_relevant:
+                            source_summary.records_relevant += 1
                     except OSError as exc:
                         logger.error("Failed to persist record %s: %s", record.source_job_id, exc)
                         manifest.quarantined.append(
@@ -215,10 +252,13 @@ class ConnectorRunner:
                 if not result.next_page or not result.next_page.has_more:
                     break
 
-                if cursor and result.next_page.next_page_url == cursor.next_page_url:
+                next_page_url = result.next_page.next_page_url
+                if next_page_url and next_page_url in seen_page_urls:
                     logger.warning("Pagination loop detected for %s. Stopping.", config.name)
                     break
 
+                if next_page_url:
+                    seen_page_urls.add(next_page_url)
                 cursor = result.next_page
 
             # End of source execution
@@ -244,6 +284,7 @@ class ConnectorRunner:
             manifest.summary.total_relevant += src_summary.records_relevant
 
         # Save manifest
-        self.storage.save_manifest(run_id, manifest)
+        if persist:
+            self.storage.save_manifest(run_id, manifest)
 
         return manifest

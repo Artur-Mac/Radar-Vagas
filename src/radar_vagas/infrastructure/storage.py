@@ -1,6 +1,7 @@
 """Local file-based storage for ingestion runs."""
 
 import os
+import tempfile
 from pathlib import Path
 
 from radar_vagas.domain.models import RunManifest
@@ -24,16 +25,27 @@ class LocalStorage:
         (run_dir / "quarantine").mkdir(exist_ok=True)
 
     def _atomic_write(self, path: Path, content: str) -> None:
-        """Write content to a file atomically using a temporary file and rename."""
+        """Atomically create a file without silently replacing existing data."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(".tmp")
+        tmp_path: Path | None = None
         try:
-            tmp_path.write_text(content, encoding="utf-8")
-            os.replace(tmp_path, path)
-        except Exception:
-            if tmp_path.exists():
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary_file:
+                temporary_file.write(content)
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+                tmp_path = Path(temporary_file.name)
+
+            os.link(tmp_path, path)
+        finally:
+            if tmp_path is not None and tmp_path.exists():
                 tmp_path.unlink()
-            raise
 
     def save_raw_record(
         self, run_id: str, source_name: str, source_job_id: str, payload: str

@@ -4,6 +4,8 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from radar_vagas.domain.models import (
     IngestionSummary,
     RejectedRecord,
@@ -120,3 +122,16 @@ def test_save_manifest(tmp_path: Path) -> None:
     assert manifest_data["rejected"][0]["source_job_id"] == "j1"
     assert summary_data["run_id"] == run_id
     assert summary_data["total_fetched"] == 2
+
+
+def test_atomic_write_refuses_silent_overwrite(tmp_path: Path) -> None:
+    """Existing raw payloads are never silently replaced."""
+    storage = LocalStorage(tmp_path)
+    storage.ensure_run_dirs("run_no_overwrite")
+    storage.save_raw_record("run_no_overwrite", "source", "job", '{"version": 1}')
+
+    with pytest.raises(FileExistsError):
+        storage.save_raw_record("run_no_overwrite", "source", "job", '{"version": 2}')
+
+    saved = tmp_path / "runs" / "run_no_overwrite" / "raw" / "source-job.json"
+    assert saved.read_text(encoding="utf-8") == '{"version": 1}'

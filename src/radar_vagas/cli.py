@@ -49,19 +49,29 @@ def main(args: list[str] | None = None) -> int:
 
     # Command: collect
     collect_parser = subparsers.add_parser("collect", help="Execute initial job ingestion pipeline")
-    collect_parser.add_argument("--source", action="append", help="Specific source to run (repeatable)")
+    collect_parser.add_argument(
+        "--source", action="append", help="Specific source to run (repeatable)"
+    )
     collect_parser.add_argument("--source-type", type=str, help="Specific source type to run")
     collect_parser.add_argument("--limit", type=int, help="Global limit of records to fetch")
     collect_parser.add_argument("--per-source-limit", type=int, help="Limit of records per source")
-    collect_parser.add_argument("--catalog-dir", type=str, default="catalogs", help="Path to catalog directory")
-    collect_parser.add_argument("--output-dir", type=str, default="data", help="Output directory for runs")
-    collect_parser.add_argument("--dry-run", action="store_true", help="Do not persist records to disk")
-    collect_parser.add_argument("--fail-fast", action="store_true", help="Fail fast on configuration errors")
+    collect_parser.add_argument(
+        "--catalog-dir", type=str, default="catalogs", help="Path to catalog directory"
+    )
+    collect_parser.add_argument(
+        "--output-dir", type=str, default="data", help="Output directory for runs"
+    )
+    collect_parser.add_argument(
+        "--dry-run", action="store_true", help="Do not persist records to disk"
+    )
+    collect_parser.add_argument(
+        "--fail-fast", action="store_true", help="Fail fast on configuration errors"
+    )
 
     # Command: runs
     runs_parser = subparsers.add_parser("runs", help="Manage ingestion runs")
     runs_subparsers = runs_parser.add_subparsers(dest="runs_command")
-    
+
     runs_show = runs_subparsers.add_parser("show", help="Show details of a specific run")
     runs_show.add_argument("run_id", type=str, help="The ID of the run to show")
     runs_show.add_argument("--output-dir", type=str, default="data", help="Base directory for runs")
@@ -160,23 +170,17 @@ def main(args: list[str] | None = None) -> int:
 
         registry = build_default_registry()
         storage = LocalStorage(output_dir)
-        client = create_http_client(HttpPolicy())
-
         if parsed_args.dry_run:
-            print("⚠️ DRY RUN ENABLED - No records will be persisted to disk.")
-            import unittest.mock
+            print("⚠️ DRY RUN ENABLED - No files or directories will be persisted.")
 
-            storage.save_raw_record = unittest.mock.MagicMock()  # type: ignore
-            storage.save_quarantined_record = unittest.mock.MagicMock()  # type: ignore
-            storage.save_manifest = unittest.mock.MagicMock()  # type: ignore
-
-        runner = ConnectorRunner(registry=registry, storage=storage, client=client)
-
-        manifest = runner.run(
-            configs=sources,
-            global_limit=parsed_args.limit,
-            per_source_limit=parsed_args.per_source_limit,
-        )
+        with create_http_client(HttpPolicy()) as client:
+            runner = ConnectorRunner(registry=registry, storage=storage, client=client)
+            manifest = runner.run(
+                configs=sources,
+                global_limit=parsed_args.limit,
+                per_source_limit=parsed_args.per_source_limit,
+                persist=not parsed_args.dry_run,
+            )
 
         print("\n" + "=" * 60)
         print("📊 INGESTION SUMMARY")

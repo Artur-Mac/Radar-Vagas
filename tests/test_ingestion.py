@@ -10,6 +10,7 @@ from radar_vagas.core.ingestion import ConnectorRunner
 from radar_vagas.domain.connector import JobConnector
 from radar_vagas.domain.models import (
     CanonicalJob,
+    CollectionError,
     ConnectorResult,
     Pagination,
     RawJobRecord,
@@ -261,7 +262,85 @@ def test_validation_missing_job_id_and_missing_payload(
     assert len(manifest.rejected) == 2
     rejected_reasons = [r.reason for r in manifest.rejected]
     assert "missing_source_job_id" in rejected_reasons
-    assert "missing_url_and_payload" in rejected_reasons
+    assert "missing_source_url" in rejected_reasons
+
+    run_dir = next((tmp_path / "runs").iterdir())
+    quarantine_files = list((run_dir / "quarantine").glob("*.json"))
+    assert len(quarantine_files) == 2
+
+
+def test_dry_run_does_not_create_files(tmp_path: Path, offline_client: httpx.Client) -> None:
+    """A dry run computes a manifest without creating the run directory."""
+    config = SourceConfig(
+        name="source_dry_run",
+        source_type=SourceType.aggregator_api,
+        base_url="https://example.com/api",
+    )
+    record = RawJobRecord(
+        source_name=config.name,
+        source_type=config.source_type,
+        source_job_id="job_1",
+        content_hash="hash_1",
+        raw_payload='{"title": "Data Engineer"}',
+        source_url="https://example.com/jobs/1",
+    )
+
+    connector = DummyConnector(
+        config,
+        fetch_side_effect=lambda client, limit=100, cursor=None: ConnectorResult(
+            source_name=config.name,
+            records=[record],
+            records_fetched=1,
+        ),
+    )
+    registry = ConnectorRegistry()
+    registry.register(SourceType.aggregator_api, lambda cfg: connector)
+    runner = ConnectorRunner(
+        registry=registry,
+        storage=LocalStorage(tmp_path),
+        client=offline_client,
+    )
+
+    manifest = runner.run([config], persist=False)
+
+    assert manifest.summary.total_valid == 1
+    assert not (tmp_path / "runs").exists()
+
+
+def test_connector_error_is_not_reported_as_empty(
+    tmp_path: Path, offline_client: httpx.Client
+) -> None:
+    """An error with no records is a failure, not a healthy empty source."""
+    config = SourceConfig(
+        name="source_error",
+        source_type=SourceType.aggregator_api,
+        base_url="https://example.com/api",
+    )
+    error = CollectionError(
+        source_name=config.name,
+        phase="fetch",
+        message="service unavailable",
+    )
+    connector = DummyConnector(
+        config,
+        fetch_side_effect=lambda client, limit=100, cursor=None: ConnectorResult(
+            source_name=config.name,
+            records=[],
+            errors=[error],
+            records_failed=1,
+        ),
+    )
+    registry = ConnectorRegistry()
+    registry.register(SourceType.aggregator_api, lambda cfg: connector)
+    runner = ConnectorRunner(
+        registry=registry,
+        storage=LocalStorage(tmp_path),
+        client=offline_client,
+    )
+
+    manifest = runner.run([config])
+
+    assert manifest.summary.sources[config.name].state == RunState.temporary_failure
 
 
 def test_pagination_limits_and_loop_protection(

@@ -4,9 +4,11 @@
 
 ---
 
-## 1. Project Goal & Current Status (Época 2 - Source Catalog & Connector Framework)
+## 1. Project Goal & Current Status (Época 3 - Initial Job Ingestion)
 
-Época 1 established a clean, reproducible, and well-tested technical foundation. Época 2 adds a catalogue-driven, contract-based connector framework for job data sources.
+Épocas 1 and 2 established the local foundation and connector framework. Época 3 adds
+multi-source ingestion, run manifests, raw payload persistence, exact in-run deduplication,
+quarantine, pagination, and deterministic relevance screening.
 
 **Completed:**
 - Core package structure under `src/radar_vagas/` with typed configuration, CLI, consistent formatted logging, and Ollama diagnostics.
@@ -14,6 +16,8 @@
 - Connector Framework: Protocol-based connector interface with 4 tested implementations (Remotive, Arbeitnow, Greenhouse, Lever).
 - HTTP Policy Layer: Centralised timeouts, retries with exponential backoff, rate limiting, and user-agent management.
 - Connector Registry: Factory-pattern mapping `SourceType → Connector` for extensibility.
+- Ingestion Runner: Isolated source execution with global/per-source limits and run summaries.
+- Local Run Storage: Atomic, no-overwrite persistence under `data/runs/<run_id>/`.
 
 > [!NOTE]
 > **PoC Technical Review Note**: The initial PoC proved end-to-end data flow (ingestion, raw storage, canonical schema mapping, DuckDB analytics). However, per [TECHNICAL_REVIEW.md](poc/TECHNICAL_REVIEW.md), the PoC report does **NOT** constitute proof of local LLM quality (H4), LLM latency/throughput (H5), fuzzy deduplication (H6), or recommendation utility (H7) until a manually labeled evaluation dataset is executed.
@@ -71,6 +75,17 @@ You can run the application using the `radar-vagas` command or `uv run radar-vag
   ```bash
   uv run radar-vagas sources
   uv run radar-vagas sources --active-only
+  ```
+
+- **Collect a bounded sample**:
+  ```bash
+  uv run radar-vagas collect --limit 10 --per-source-limit 5
+  uv run radar-vagas collect --source remotive --limit 5 --dry-run
+  ```
+
+- **Inspect a persisted run**:
+  ```bash
+  uv run radar-vagas runs show <run-id>
   ```
 
 The `doctor` command inspects whether the Ollama HTTP daemon is reachable and whether the configured model is installed locally. If Ollama is offline, it outputs a clear explanatory status message without crashing.
@@ -190,7 +205,7 @@ Radar-Vagas/
 │   ├── connectors/
 │   ├── data/
 │   └── run_poc.py
-└── tests/                      # Unit test suite (51 tests)
+└── tests/                      # Offline unit and integration-style test suite
 ```
 
 ---
@@ -199,4 +214,7 @@ Radar-Vagas/
 
 - **Heuristic Engine vs. LLM**: The PoC uses deterministic rules for some extraction and classification tasks. These rules do not generate new prose, but can still produce false positives and false negatives and require evaluation against labeled data.
 - **LLM Inference**: LLM enrichment via Ollama is optional and deferred. LLM quality, latency percentiles, and structured extraction precision will be formally evaluated in future epics using labeled ground-truth fixtures per [TECHNICAL_REVIEW.md](poc/TECHNICAL_REVIEW.md).
-- **Connector Framework Ready, Ingestion Deferred**: The connector framework (Época 2) defines contracts, policies, and catalog management. Actual pipeline execution (fetch → store raw → normalize → deduplicate) will be implemented in Época 3.
+- **Ingestion is run-scoped**: Época 3 preserves immutable raw payloads per run. Cross-run
+  history, snapshots, `first_seen`/`last_seen`, replay, and closure detection belong to Época 4.
+- **Relevance is exploratory**: the current regex is intentionally broad and must not be read as
+  a validated count of suitable Data/AI roles.

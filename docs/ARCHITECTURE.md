@@ -1,8 +1,10 @@
-# Radar-Vagas Architecture Document (Época 2 - Source Catalog & Connector Framework)
+# Radar-Vagas Architecture Document (Época 3 - Initial Job Ingestion)
 
 ## 1. Overview
 
-**Radar-Vagas** is a local-first job market intelligence platform. Época 1 established a clean, maintainable foundation. Época 2 adds a catalogue-driven, contract-based connector framework that allows new job data sources to be registered and executed without modifying the ingestion pipeline.
+**Radar-Vagas** is a local-first job market intelligence platform. Época 3 adds a
+run-scoped ingestion service and local raw storage to the foundation and connector framework
+delivered by Épocas 1 and 2.
 
 ## 2. Directory Layout & Layer Separation
 
@@ -44,7 +46,7 @@ Radar-Vagas/
 │           └── llm/
 │               └── ollama_client.py  # Ollama service diagnostics
 ├── poc/                        # Isolated experimental PoC scripts & exploratory code
-└── tests/                      # Automated test suite (pytest, 51 tests)
+└── tests/                      # Automated test suite (pytest, 75 tests)
 ```
 
 ## 3. Core Architectural Decisions
@@ -76,7 +78,8 @@ The connector framework follows these principles:
 1. **Protocol over ABC**: Connectors implement a `JobConnector` Protocol (structural subtyping) for maximum flexibility and testability without inheritance coupling.
 2. **Injected HTTP Client**: Connectors receive an `httpx.Client` at `fetch()` time, enabling centralised HTTP policy and trivial mocking.
 3. **Catalogue-Driven Configuration**: Source definitions live in TOML files (`catalogs/`), not in code. Adding a source is a configuration change, not a code change.
-4. **Structured Failure Reporting**: A failing connector produces a `ConnectorResult` with structured errors. Cross-source orchestration and failure isolation remain work for Época 3.
+4. **Failure Isolation**: `ConnectorRunner` records source failures and continues with independent
+   sources. Healthy empty results remain distinct from failed results.
 
 ### 4.2 Component Diagram
 
@@ -128,3 +131,25 @@ All connectors use the centralised `polite_get()` function which provides:
 - **Offline Testing**: All tests use `httpx.MockTransport` for HTTP mocking. Zero network dependency.
 - **Diagnostics**: `radar-vagas doctor` checks Ollama daemon availability and model installation status.
 - **Source Management**: `radar-vagas sources` lists all registered sources from the TOML catalog.
+
+## 6. Ingestion and Run Storage (Época 3)
+
+`ConnectorRunner` selects active catalog entries, applies global and per-source limits, follows
+connector pagination, validates minimum source identity and URL fields, removes exact duplicates
+within the run, and persists accepted raw payloads through `LocalStorage`.
+
+Each persisted execution writes:
+
+```text
+data/runs/<run_id>/
+├── manifest.json
+├── summary.json
+├── raw/
+└── quarantine/
+```
+
+Writes use a temporary file plus an atomic no-overwrite link. `--dry-run` computes the same
+manifest in memory without creating files or directories.
+
+The current storage is deliberately run-scoped. Cross-run identity, snapshots, replay, job
+status, and retention policies are deferred to Época 4.

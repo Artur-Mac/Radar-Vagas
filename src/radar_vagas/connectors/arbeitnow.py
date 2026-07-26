@@ -48,7 +48,9 @@ class ArbeitnowConnector:
             rate_limit_delay=self._config.rate_limit_delay,
         )
 
-        url = cursor.next_page_url if cursor and cursor.next_page_url else str(self._config.base_url)
+        url = (
+            cursor.next_page_url if cursor and cursor.next_page_url else str(self._config.base_url)
+        )
 
         try:
             response = polite_get(client, url, policy=policy)

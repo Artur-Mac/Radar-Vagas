@@ -291,17 +291,18 @@ def test_polite_get_sanitizes_logs(caplog: pytest.LogCaptureFixture) -> None:
     transport = httpx.MockTransport(handler)
     policy = HttpPolicy(max_retries=2)
     mock_sleep = MagicMock()
-    with httpx.Client(transport=transport) as client, caplog.at_level("DEBUG", logger="radar_vagas.infrastructure.http"):
-            polite_get(
-                client,
-                "https://user:secretpass@api.example.com/search?api_key=supersecret123",
-                policy=policy,
-                sleep_fn=mock_sleep,
-            )
+    with (
+        httpx.Client(transport=transport) as client,
+        caplog.at_level("DEBUG", logger="radar_vagas.infrastructure.http"),
+    ):
+        polite_get(
+            client,
+            "https://test-user:test-password@api.example.com/search?access_token=test-value",
+            policy=policy,
+            sleep_fn=mock_sleep,
+        )
 
     rv_logs = "\n".join(r.getMessage() for r in caplog.records if r.name == "radar_vagas.http")
-    assert "supersecret123" not in rv_logs
-    assert "secretpass" not in rv_logs
+    assert "test-value" not in rv_logs
+    assert "test-password" not in rv_logs
     assert "api.example.com/search" in rv_logs
-
-

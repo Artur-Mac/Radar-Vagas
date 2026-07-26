@@ -155,7 +155,10 @@ def polite_get(
         except httpx.HTTPStatusError as exc:
             metrics.last_status = exc.response.status_code
             metrics.errors.append(str(exc))
-            if exc.response.status_code not in _RETRYABLE_STATUS_CODES or attempt == policy.max_retries:
+            if (
+                exc.response.status_code not in _RETRYABLE_STATUS_CODES
+                or attempt == policy.max_retries
+            ):
                 raise
             if exc.response.status_code == 429 and "Retry-After" in exc.response.headers:
                 try:
@@ -185,4 +188,3 @@ def polite_get(
         request=httpx.Request("GET", url),
         response=httpx.Response(metrics.last_status),
     )
-
