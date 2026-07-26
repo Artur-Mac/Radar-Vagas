@@ -17,6 +17,7 @@ from radar_vagas.domain.models import (
     BackupManifest,
     CleanedSourceText,
     HistoricalQuarantineRecord,
+    NormalizedJobLink,
     RawJobRecord,
     RetentionPolicy,
     RetentionReport,
@@ -158,6 +159,21 @@ MIGRATIONS = [
     """
     ALTER TABLE schema_migrations ADD COLUMN checksum VARCHAR;
     """,
+    """
+    CREATE TABLE normalized_job_links (
+        normalized_job_id VARCHAR,
+        source_name VARCHAR,
+        source_job_id VARCHAR,
+        observation_id VARCHAR,
+        raw_content_hash VARCHAR,
+        cleaned_id VARCHAR,
+        schema_version VARCHAR,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (normalized_job_id, observation_id),
+        FOREIGN KEY (observation_id) REFERENCES source_job_observations(observation_id),
+        FOREIGN KEY (cleaned_id) REFERENCES cleaned_source_text(cleaned_id)
+    );
+    """,
 ]
 
 
@@ -252,6 +268,27 @@ class HistoricalStorage:
                 self.conn.execute(
                     "UPDATE schema_migrations SET checksum = ? WHERE version = ?",
                     [migration_checksum, i],
+                )
+
+        checksum_column_exists = (
+            self.conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM information_schema.columns
+                WHERE table_name = 'schema_migrations' AND column_name = 'checksum'
+                """
+            ).fetchone()[0]
+            == 1
+        )
+        if checksum_column_exists:
+            rows_without_checksum = self.conn.execute(
+                "SELECT version FROM schema_migrations WHERE checksum IS NULL"
+            ).fetchall()
+            for (version,) in rows_without_checksum:
+                checksum = hashlib.sha256(MIGRATIONS[version].strip().encode("utf-8")).hexdigest()
+                self.conn.execute(
+                    "UPDATE schema_migrations SET checksum = ? WHERE version = ?",
+                    [checksum, version],
                 )
 
     def _get_blob_path(self, content_hash: str) -> Path:
@@ -359,6 +396,86 @@ class HistoricalStorage:
             cleaned_text=row[5],
             created_at=row[6],
         )
+
+    def save_normalized_job_link(self, link: NormalizedJobLink) -> None:
+        observation = self.conn.execute(
+            """
+            SELECT source_name, source_job_id, content_hash
+            FROM source_job_observations
+            WHERE observation_id = ?
+            """,
+            [link.observation_id],
+        ).fetchone()
+        if observation is None:
+            raise ValueError(f"Unknown observation_id: {link.observation_id}")
+        if observation != (
+            link.source_name,
+            link.source_job_id,
+            link.raw_content_hash,
+        ):
+            raise ValueError("Normalized link provenance does not match its raw observation")
+
+        if link.cleaned_id is not None:
+            cleaned = self.conn.execute(
+                """
+                SELECT observation_id, raw_content_hash
+                FROM cleaned_source_text
+                WHERE cleaned_id = ?
+                """,
+                [link.cleaned_id],
+            ).fetchone()
+            if cleaned != (link.observation_id, link.raw_content_hash):
+                raise ValueError(
+                    "Normalized link cleaned artifact does not match its raw observation"
+                )
+
+        self.conn.execute(
+            """
+            INSERT INTO normalized_job_links (
+                normalized_job_id, source_name, source_job_id, observation_id,
+                raw_content_hash, cleaned_id, schema_version, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (normalized_job_id, observation_id) DO UPDATE SET
+                raw_content_hash = EXCLUDED.raw_content_hash,
+                cleaned_id = EXCLUDED.cleaned_id,
+                schema_version = EXCLUDED.schema_version
+            """,
+            [
+                link.normalized_job_id,
+                link.source_name,
+                link.source_job_id,
+                link.observation_id,
+                link.raw_content_hash,
+                link.cleaned_id,
+                link.schema_version,
+                link.created_at.isoformat(),
+            ],
+        )
+
+    def get_normalized_job_links(self, normalized_job_id: str) -> list[NormalizedJobLink]:
+        rows = self.conn.execute(
+            """
+            SELECT normalized_job_id, source_name, source_job_id, observation_id,
+                   raw_content_hash, cleaned_id, schema_version, created_at
+            FROM normalized_job_links
+            WHERE normalized_job_id = ?
+            ORDER BY observation_id
+            """,
+            [normalized_job_id],
+        ).fetchall()
+        return [
+            NormalizedJobLink(
+                normalized_job_id=row[0],
+                source_name=row[1],
+                source_job_id=row[2],
+                observation_id=row[3],
+                raw_content_hash=row[4],
+                cleaned_id=row[5],
+                schema_version=row[6],
+                created_at=row[7],
+            )
+            for row in rows
+        ]
 
     def quarantine_record(self, record: HistoricalQuarantineRecord) -> None:
         self.conn.execute(
@@ -680,46 +797,61 @@ class HistoricalStorage:
             raise
 
     def backup(self, destination_dir: Path) -> BackupManifest:
-        destination_dir.mkdir(parents=True, exist_ok=True)
-        backup_db_path = destination_dir / "history.duckdb"
-        backup_blobs_dir = destination_dir / "blobs" / "sha256"
+        if destination_dir.exists():
+            raise FileExistsError(f"Backup destination already exists: {destination_dir}")
 
-        self.conn.execute("CHECKPOINT")
-
-        shutil.copy2(self.db_path, backup_db_path)
-
-        if self.blobs_dir.exists():
-            shutil.copytree(self.blobs_dir, backup_blobs_dir, dirs_exist_ok=True)
-
-        db_bytes = backup_db_path.read_bytes()
-        db_checksum = hashlib.sha256(db_bytes).hexdigest()
-
-        total_blobs = 0
-        total_bytes = 0
-        if backup_blobs_dir.exists():
-            for p in backup_blobs_dir.rglob("*.json"):
-                if p.is_file():
-                    total_blobs += 1
-                    total_bytes += p.stat().st_size
-
-        from radar_vagas import __version__
-
-        current_version_num = len(MIGRATIONS) - 1
-
-        manifest = BackupManifest(
-            backup_id=f"backup_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}",
-            created_at=datetime.now(UTC),
-            application_version=__version__,
-            schema_version=current_version_num,
-            db_checksum=db_checksum,
-            total_blobs=total_blobs,
-            total_bytes=total_bytes,
+        destination_dir.parent.mkdir(parents=True, exist_ok=True)
+        staging_dir = Path(
+            tempfile.mkdtemp(
+                prefix=f".{destination_dir.name}.staging-",
+                dir=destination_dir.parent,
+            )
         )
+        try:
+            backup_db_path = staging_dir / "history.duckdb"
+            backup_blobs_dir = staging_dir / "blobs" / "sha256"
 
-        manifest_path = destination_dir / "backup_manifest.json"
-        manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+            # A checkpoint makes the DuckDB file self-contained. Callers must
+            # ensure no concurrent HistoricalStorage writer is active while
+            # this local snapshot copies the database and CAS tree.
+            self.conn.execute("CHECKPOINT")
+            shutil.copy2(self.db_path, backup_db_path)
 
-        logger.info(f"Created backup {manifest.backup_id} at {destination_dir}")
+            if self.blobs_dir.exists():
+                shutil.copytree(self.blobs_dir, backup_blobs_dir)
+
+            db_checksum = hashlib.sha256(backup_db_path.read_bytes()).hexdigest()
+            total_blobs = 0
+            total_bytes = 0
+            if backup_blobs_dir.exists():
+                for blob_path in backup_blobs_dir.rglob("*.json"):
+                    if blob_path.is_file():
+                        total_blobs += 1
+                        total_bytes += blob_path.stat().st_size
+
+            from radar_vagas import __version__
+
+            manifest = BackupManifest(
+                backup_id=(
+                    f"backup_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+                ),
+                created_at=datetime.now(UTC),
+                application_version=__version__,
+                schema_version=len(MIGRATIONS) - 1,
+                db_checksum=db_checksum,
+                total_blobs=total_blobs,
+                total_bytes=total_bytes,
+            )
+            (staging_dir / "backup_manifest.json").write_text(
+                manifest.model_dump_json(indent=2), encoding="utf-8"
+            )
+            staging_dir.rename(destination_dir)
+        except BaseException:
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir)
+            raise
+
+        logger.info("Created backup %s at %s", manifest.backup_id, destination_dir)
         return manifest
 
     @classmethod
@@ -732,35 +864,81 @@ class HistoricalStorage:
 
         manifest = BackupManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
 
-        target_db_path = target_data_dir / "db" / "history.duckdb"
-        target_blobs_dir = target_data_dir / "blobs" / "sha256"
-
         if target_data_dir.exists() and any(target_data_dir.iterdir()) and not force:
             raise FileExistsError(
                 f"Target data directory {target_data_dir} is not empty. Use force=True to overwrite."
             )
 
-        target_data_dir.mkdir(parents=True, exist_ok=True)
-
         backup_db_path = backup_dir / "history.duckdb"
-        target_db_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(backup_db_path, target_db_path)
+        if not backup_db_path.is_file():
+            raise FileNotFoundError(f"Backup database not found in {backup_dir}")
+        if hashlib.sha256(backup_db_path.read_bytes()).hexdigest() != manifest.db_checksum:
+            raise ValueError("Backup database checksum mismatch")
 
-        restored_db_checksum = hashlib.sha256(target_db_path.read_bytes()).hexdigest()
-        if restored_db_checksum != manifest.db_checksum:
-            raise ValueError("Restored database checksum mismatch!")
+        backup_resolved = backup_dir.resolve()
+        target_resolved = target_data_dir.resolve()
+        if backup_resolved == target_resolved or backup_resolved.is_relative_to(target_resolved):
+            raise ValueError("Backup directory cannot be inside the restore target")
 
-        backup_blobs_dir = backup_dir / "blobs" / "sha256"
-        if backup_blobs_dir.exists():
-            shutil.copytree(backup_blobs_dir, target_blobs_dir, dirs_exist_ok=True)
+        target_data_dir.parent.mkdir(parents=True, exist_ok=True)
+        staging_dir = Path(
+            tempfile.mkdtemp(
+                prefix=f".{target_data_dir.name}.restore-",
+                dir=target_data_dir.parent,
+            )
+        )
+        old_target: Path | None = None
+        try:
+            staging_db_path = staging_dir / "db" / "history.duckdb"
+            staging_blobs_dir = staging_dir / "blobs" / "sha256"
+            staging_db_path.parent.mkdir(parents=True)
+            shutil.copy2(backup_db_path, staging_db_path)
 
-        storage = cls(target_data_dir, db_path=target_db_path)
-        report = storage.verify_integrity()
-        if not report.is_valid:
-            raise ValueError(f"Restored storage failed integrity check: {report}")
+            backup_blobs_dir = backup_dir / "blobs" / "sha256"
+            if backup_blobs_dir.exists():
+                shutil.copytree(backup_blobs_dir, staging_blobs_dir)
 
-        logger.info(f"Successfully restored backup {manifest.backup_id} to {target_data_dir}")
-        return storage
+            with cls(staging_dir, db_path=staging_db_path) as staged_storage:
+                report = staged_storage.verify_integrity()
+                if not report.is_valid:
+                    raise ValueError(f"Restored storage failed integrity check: {report}")
+
+            if target_data_dir.exists():
+                if any(target_data_dir.iterdir()):
+                    if not force:
+                        raise FileExistsError(
+                            f"Target data directory {target_data_dir} became non-empty "
+                            "during restore. Use force=True to overwrite."
+                        )
+                    old_target = target_data_dir.with_name(
+                        f".{target_data_dir.name}.restore-old-{uuid.uuid4().hex[:8]}"
+                    )
+                    target_data_dir.rename(old_target)
+                else:
+                    target_data_dir.rmdir()
+
+            try:
+                staging_dir.rename(target_data_dir)
+            except BaseException:
+                if old_target is not None and old_target.exists():
+                    old_target.rename(target_data_dir)
+                raise
+
+            if old_target is not None and old_target.exists():
+                try:
+                    shutil.rmtree(old_target)
+                except OSError:
+                    logger.exception(
+                        "Restore succeeded but the previous target remains at %s",
+                        old_target,
+                    )
+        except BaseException:
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir)
+            raise
+
+        logger.info("Successfully restored backup %s to %s", manifest.backup_id, target_data_dir)
+        return cls(target_data_dir, db_path=target_data_dir / "db" / "history.duckdb")
 
     def prune_retention(self, policy: RetentionPolicy, force: bool = False) -> RetentionReport:
         if not policy.active and not force:
@@ -822,15 +1000,50 @@ class HistoricalStorage:
                 pruned_blobs_count += 1
 
         if not preview_only:
-            # 1. Delete child table records (observations, cleaned_text, source_runs, quarantine)
+            # DuckDB cannot always delete a referenced row in the same
+            # transaction that deleted its FK child. Commit each dependency
+            # level separately. Every phase is idempotent, so an interrupted
+            # prune can be retried safely.
+            self.conn.execute("BEGIN TRANSACTION")
+            try:
+                self.conn.execute(
+                    f"""
+                    DELETE FROM normalized_job_links
+                    WHERE observation_id IN (
+                        SELECT observation_id
+                        FROM source_job_observations
+                        WHERE run_id IN ({placeholders})
+                    )
+                    """,
+                    eligible_run_ids,
+                )
+                self.conn.execute("COMMIT")
+            except BaseException:
+                self.conn.execute("ROLLBACK")
+                raise
+
+            self.conn.execute("BEGIN TRANSACTION")
+            try:
+                self.conn.execute(
+                    f"""
+                    DELETE FROM cleaned_source_text
+                    WHERE observation_id IN (
+                        SELECT observation_id
+                        FROM source_job_observations
+                        WHERE run_id IN ({placeholders})
+                    )
+                    """,
+                    eligible_run_ids,
+                )
+                self.conn.execute("COMMIT")
+            except BaseException:
+                self.conn.execute("ROLLBACK")
+                raise
+
             self.conn.execute("BEGIN TRANSACTION")
             try:
                 self.conn.execute(
                     f"DELETE FROM historical_quarantine WHERE run_id IN ({placeholders})",
-                    eligible_run_ids,
-                )
-                self.conn.execute(
-                    f"DELETE FROM cleaned_source_text WHERE observation_id IN (SELECT observation_id FROM source_job_observations WHERE run_id IN ({placeholders}))",
                     eligible_run_ids,
                 )
                 self.conn.execute(
@@ -846,22 +1059,40 @@ class HistoricalStorage:
                 self.conn.execute("ROLLBACK")
                 raise
 
-            # 2. Delete parent ingestion_runs records
             self.conn.execute("BEGIN TRANSACTION")
             try:
+                for h in orphan_blobs_to_delete:
+                    self.conn.execute("DELETE FROM raw_blobs WHERE content_hash = ?", [h])
                 self.conn.execute(
                     f"DELETE FROM ingestion_runs WHERE run_id IN ({placeholders})",
                     eligible_run_ids,
                 )
-                for h in orphan_blobs_to_delete:
-                    self.conn.execute("DELETE FROM raw_blobs WHERE content_hash = ?", [h])
-                    blob_path = self._get_blob_path(h)
-                    if blob_path.exists():
-                        blob_path.unlink()
+                self.conn.execute(
+                    """
+                    DELETE FROM source_jobs
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM source_job_observations observation
+                        WHERE observation.source_name = source_jobs.source_name
+                          AND observation.source_job_id = source_jobs.source_job_id
+                    )
+                    """
+                )
                 self.conn.execute("COMMIT")
             except BaseException:
                 self.conn.execute("ROLLBACK")
                 raise
+
+            # Filesystem deletion happens only after the database no longer
+            # references these hashes. A failed unlink leaves a detectable,
+            # harmless orphan file rather than a broken database reference.
+            for content_hash in orphan_blobs_to_delete:
+                blob_path = self._get_blob_path(content_hash)
+                try:
+                    if blob_path.exists():
+                        blob_path.unlink()
+                except OSError:
+                    logger.exception("Failed to remove unreferenced blob %s", content_hash)
 
         return RetentionReport(
             preview_only=preview_only,

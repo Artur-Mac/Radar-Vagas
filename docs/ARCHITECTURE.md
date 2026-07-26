@@ -1,8 +1,12 @@
-# Radar-Vagas Architecture Document (Época 4 Completed)
+# Radar-Vagas Architecture Document (Época 4 closure candidate)
 
 ## 1. Overview
 
-**Radar-Vagas** is a local-first job market intelligence platform. Épocas 1–3 built the connector framework, multi-source ingestion service, and local run storage. **Época 4 (Raw Data and Historical Storage)** provides a fully hardened, observable, and reproducible storage layer backed by DuckDB metadata, Content-Addressed Storage (CAS) SHA-256 payload blobs, versioned HTML/text cleaning, atomic snapshot backup/restore, retention pruning, and migration tampering protection.
+**Radar-Vagas** is a local-first job market intelligence platform. Épocas 1–3 built the
+connector framework, multi-source ingestion service, and local run storage. The Época 4 closure
+candidate provides an observable and replayable storage layer backed by DuckDB metadata,
+Content-Addressed Storage (CAS), versioned text cleaning, locally published snapshots,
+retention controls, and migration-tampering detection.
 
 ---
 
@@ -52,7 +56,7 @@ Radar-Vagas/
 │           └── llm/
 │               └── ollama_client.py # Ollama service diagnostics
 ├── poc/                        # Isolated experimental PoC scripts
-└── tests/                      # 100% offline test suite (119 passing tests)
+└── tests/                      # 100% offline test suite
 ```
 
 ---
@@ -73,13 +77,15 @@ Radar-Vagas/
 ```mermaid
 graph TD
     Layer1["Layer 1: Raw Observations (CAS Blobs + DuckDB)"] -->|observation_id + raw_content_hash| Layer2["Layer 2: Cleaned Source Text (cleaned_source_text)"]
-    Layer1 -->|raw_content_hash + observation_id| Layer3["Layer 3: Epoch 5 Boundary (NormalizedJobLink)"]
+    Layer1 -->|raw_content_hash + observation_id| Layer3["Layer 3: normalized_job_links"]
     Layer2 -->|cleaned_id| Layer3
 ```
 
 1. **Layer 1 (Raw Payload & Observations)**: Owned by `HistoricalStorage` (`source_job_observations`, `raw_blobs`, `ingestion_runs`). Immutable.
 2. **Layer 2 (Derived Cleaned Text)**: Owned by `TextCleaner` (`cleaned_source_text`). Deterministic HTML tag stripping and entity decoding, versioned by `transformation_name` and `transformation_version`.
-3. **Layer 3 (Normalized Boundary Contract)**: Defined by `NormalizedJobLink` in `domain.models`. Links normalized job entities in Epoch 5 back to their raw observation and cleaned text IDs.
+3. **Layer 3 (Normalized Boundary Contract)**: `NormalizedJobLink` and the
+   `normalized_job_links` table persist provenance from future Época 5 entities back to raw
+   observations and optional cleaned artifacts.
 
 ---
 
@@ -87,7 +93,7 @@ graph TD
 
 ### 4.1 DuckDB Schema & Sequential Migrations
 
-`HistoricalStorage` manages DuckDB migrations 0 through 11:
+`HistoricalStorage` manages DuckDB migrations 0 through 12:
 - `schema_migrations`: Version tracking and SHA-256 checksum validation to detect migration tampering (`MigrationTamperedError`).
 - `ingestion_runs`: Global run metrics, timestamps, limits, and application version.
 - `source_runs`: Per-source execution metrics and state (`success`, `partial`, `failed`).
@@ -96,10 +102,11 @@ graph TD
 - `source_job_observations`: Granular observation instances (`observation_id`, `run_id`, `content_hash`, `observed_at`, `changed_since_previous`).
 - `cleaned_source_text`: Versioned cleaned text linked to `observation_id`.
 - `historical_quarantine`: Structured quarantine logging malformed payload envelopes with failure phase and error messages.
+- `normalized_job_links`: Persisted raw/cleaned provenance boundary for Época 5.
 
 ### 4.2 Backup and Restore Snapshot Strategy
 
-`history backup` creates an atomic, consistent snapshot containing:
+`history backup` publishes a completed local snapshot atomically after creating:
 1. `history.duckdb` (checkpointed and copied)
 2. `blobs/sha256/...` (copied directory tree)
 3. `backup_manifest.json` containing backup ID, creation timestamp, schema version, total blob count, total byte size, and database SHA-256 checksum.
@@ -108,6 +115,10 @@ graph TD
 - Fails with `FileExistsError` if the target directory is non-empty, unless `--force` is specified.
 - Automatically verifies database SHA-256 checksum against `backup_manifest.json`.
 - Runs full `verify_integrity()` after restoring to validate filesystem/database parity.
+
+The current implementation does not coordinate with a concurrent writer process. Collection,
+import, cleaning, and retention must be stopped while `history backup` copies the checkpointed
+database and CAS tree.
 
 ### 4.3 Retention & Deletion Safety
 
@@ -126,7 +137,9 @@ Every committed migration in `MIGRATIONS` has a computed SHA-256 checksum. When 
 
 ## 5. Quality & Validation Metrics
 
-- **Test Suite**: 119 passing tests running 100% offline.
+- **Test Suite**: Runs 100% offline.
 - **Linter & Formatter**: `ruff check .` and `ruff format .` clean.
 - **Git Diff**: `git diff --check` clean.
-- **Performance Budget**: Scale benchmarks verified up to 3,000 synthetic records completing under 5 seconds.
+- **Performance Budget**: Scale tests cover 300, 1,000, and 3,000 synthetic records. Wall-clock
+  results are filesystem-dependent and must be reported from the current environment rather
+  than copied into documentation.

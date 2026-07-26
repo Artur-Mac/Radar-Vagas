@@ -99,3 +99,17 @@ def test_restore_fails_if_target_exists_without_force(
     restored = HistoryService.restore(backup_dir, target_data_dir, force=True)
     assert restored.verify_integrity().is_valid
     restored.close()
+    assert not (target_data_dir / "some_file.txt").exists()
+
+
+def test_backup_refuses_to_merge_into_existing_destination(
+    sample_history: HistoricalStorage, tmp_path: Path
+):
+    backup_dir = tmp_path / "existing_backup"
+    backup_dir.mkdir()
+    (backup_dir / "keep.txt").write_text("do not overwrite", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        sample_history.backup(backup_dir)
+
+    assert (backup_dir / "keep.txt").read_text(encoding="utf-8") == "do not overwrite"

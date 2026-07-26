@@ -3,8 +3,13 @@
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from radar_vagas.domain.models import (
+    CleanedSourceText,
     IngestionSummary,
+    NormalizedJobLink,
     RawJobRecord,
     RetentionPolicy,
     RunManifest,
@@ -49,6 +54,31 @@ def test_retention_preview_does_not_mutate_data(tmp_path: Path):
         )
         storage.import_run(manifest, [rec])
 
+    oldest_observation = storage.conn.execute(
+        """
+        SELECT observation_id, content_hash
+        FROM source_job_observations
+        WHERE run_id = 'run_ret_0'
+        """
+    ).fetchone()
+    cleaned = CleanedSourceText(
+        cleaned_id="cleaned-retention-test",
+        observation_id=oldest_observation[0],
+        raw_content_hash=oldest_observation[1],
+        cleaned_text="cleaned",
+    )
+    storage.save_cleaned_text(cleaned)
+    storage.save_normalized_job_link(
+        NormalizedJobLink(
+            normalized_job_id="normalized-retention-test",
+            source_name="src_ret",
+            source_job_id="job_0",
+            observation_id=oldest_observation[0],
+            raw_content_hash=oldest_observation[1],
+            cleaned_id=cleaned.cleaned_id,
+        )
+    )
+
     policy = RetentionPolicy(active=True, keep_minimum_runs=3)
 
     # Preview mode (force=False)
@@ -69,5 +99,18 @@ def test_retention_preview_does_not_mutate_data(tmp_path: Path):
     # Assert 3 runs remain
     count_after = storage.conn.execute("SELECT COUNT(*) FROM ingestion_runs").fetchone()[0]
     assert count_after == 3
+    jobs_after = storage.conn.execute("SELECT COUNT(*) FROM source_jobs").fetchone()[0]
+    assert jobs_after == 3
+    links_after = storage.conn.execute("SELECT COUNT(*) FROM normalized_job_links").fetchone()[0]
+    assert links_after == 0
+    assert storage.verify_integrity().is_valid
 
     storage.close()
+
+
+def test_retention_policy_rejects_unsafe_bounds():
+    with pytest.raises(ValidationError, match="max_age_days"):
+        RetentionPolicy(active=True, max_age_days=-1)
+
+    with pytest.raises(ValidationError, match="keep_minimum_runs"):
+        RetentionPolicy(active=True, keep_minimum_runs=0)

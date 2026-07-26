@@ -11,6 +11,7 @@ from radar_vagas.domain.models import (
     RunState,
     SourceRunSummary,
 )
+from radar_vagas.infrastructure.history import HistoricalStorage
 
 
 @pytest.fixture
@@ -118,3 +119,27 @@ def test_cli_history_verify(run_dir: Path, capsys):
     assert "Missing Blobs:        0" in captured.out
     assert "Corrupt Blobs:        0" in captured.out
     assert "Orphan Blobs (FS):    0" in captured.out
+
+
+def test_cli_history_restore_without_db_path(tmp_path: Path, capsys):
+    source_dir = tmp_path / "source"
+    backup_dir = tmp_path / "backup"
+    target_dir = tmp_path / "restored"
+
+    with HistoricalStorage(source_dir) as storage:
+        storage.backup(backup_dir)
+
+    code = main(
+        [
+            "history",
+            "restore",
+            "--backup-dir",
+            str(backup_dir),
+            "--target-dir",
+            str(target_dir),
+        ]
+    )
+
+    assert code == 0
+    assert (target_dir / "db" / "history.duckdb").is_file()
+    assert "RESTORE COMPLETED & VERIFIED" in capsys.readouterr().out

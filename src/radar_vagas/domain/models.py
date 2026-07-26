@@ -324,6 +324,14 @@ class RetentionPolicy(BaseModel):
     max_age_days: int | None = None
     keep_minimum_runs: int = 5
 
+    @model_validator(mode="after")
+    def validate_retention_bounds(self) -> "RetentionPolicy":
+        if self.max_age_days is not None and self.max_age_days < 0:
+            raise ValueError("max_age_days cannot be negative")
+        if self.keep_minimum_runs < 1:
+            raise ValueError("keep_minimum_runs must be at least 1")
+        return self
+
 
 class RetentionReport(BaseModel):
     """Summary of data pruned by a retention execution."""

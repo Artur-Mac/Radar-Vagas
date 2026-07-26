@@ -22,6 +22,16 @@ def positive_int(value: str) -> int:
     return ivalue
 
 
+def non_negative_int(value: str) -> int:
+    try:
+        ivalue = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value} is not a valid integer")
+    if ivalue < 0:
+        raise argparse.ArgumentTypeError(f"{value} must be zero or greater")
+    return ivalue
+
+
 def main(args: list[str] | None = None) -> int:
     """CLI entrypoint function."""
     parser = argparse.ArgumentParser(
@@ -135,7 +145,8 @@ def main(args: list[str] | None = None) -> int:
     history_verify.add_argument("--db-path", type=str, help="Path to DuckDB database")
 
     history_backup = history_subparsers.add_parser(
-        "backup", help="Create an atomic snapshot backup of history DB and blobs"
+        "backup",
+        help="Publish a local snapshot (requires no concurrent history writer)",
     )
     history_backup.add_argument(
         "--dest-dir", type=str, required=True, help="Destination directory for backup snapshot"
@@ -154,8 +165,6 @@ def main(args: list[str] | None = None) -> int:
     history_restore.add_argument(
         "--force", action="store_true", help="Overwrite target directory if non-empty"
     )
-    history_restore.add_argument("--db-path", type=str, help="Path to DuckDB database")
-
     history_clean = history_subparsers.add_parser(
         "clean", help="Derive versioned cleaned source text for observations"
     )
@@ -164,20 +173,27 @@ def main(args: list[str] | None = None) -> int:
     history_prune = history_subparsers.add_parser(
         "prune", help="Preview or execute retention pruning"
     )
-    history_prune.add_argument("--max-age-days", type=int, help="Maximum age of runs in days")
     history_prune.add_argument(
-        "--keep-min-runs", type=int, default=5, help="Minimum number of latest runs to keep"
+        "--max-age-days",
+        type=non_negative_int,
+        help="Maximum age of runs in days",
+    )
+    history_prune.add_argument(
+        "--keep-min-runs",
+        type=positive_int,
+        default=5,
+        help="Minimum number of latest runs to keep",
     )
     history_prune.add_argument(
         "--force", action="store_true", help="Execute deletion (default is preview mode)"
     )
     history_prune.add_argument("--db-path", type=str, help="Path to DuckDB database")
 
-    history_req = history_subparsers.add_parser(
-        "reprocess-quarantine",
-        help="Attempt to reprocess records from historical quarantine",
+    history_quarantine = history_subparsers.add_parser(
+        "quarantine",
+        help="Inspect historical quarantine records",
     )
-    history_req.add_argument("--db-path", type=str, help="Path to DuckDB database")
+    history_quarantine.add_argument("--db-path", type=str, help="Path to DuckDB database")
 
     parsed_args = parser.parse_args(args)
 
@@ -369,7 +385,7 @@ def main(args: list[str] | None = None) -> int:
         from radar_vagas.infrastructure.history import HistoricalStorage
         from radar_vagas.infrastructure.storage import LocalStorage
 
-        db_path_str = parsed_args.db_path or settings.db_path
+        db_path_str = getattr(parsed_args, "db_path", None) or settings.db_path
         db_path = Path(db_path_str)
         data_dir = db_path.parent.parent if db_path.parent.name == "db" else db_path.parent
 
@@ -564,12 +580,16 @@ def main(args: list[str] | None = None) -> int:
             print("=" * 60 + "\n")
             return 0
 
-        if parsed_args.history_command == "reprocess-quarantine":
+        if parsed_args.history_command == "quarantine":
             with HistoricalStorage(data_dir, db_path=db_path) as history:
-                service = HistoryService(LocalStorage(Path("data")), history)
-                count = service.reprocess_quarantine()
+                records = history.get_quarantined_records()
 
-            print(f"🔄 Reprocessed {count} quarantined record(s).")
+            print(f"🧯 Historical quarantine contains {len(records)} record(s).")
+            if records:
+                print(
+                    "Fix the original run files and execute `history import` again; "
+                    "failed runs are not marked as imported."
+                )
             return 0
 
     parser.print_help()

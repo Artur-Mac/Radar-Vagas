@@ -29,6 +29,10 @@ def test_migration_safety(tmp_path: Path):
 
     # Check that new column exists
     storage.conn.execute("SELECT application_version FROM ingestion_runs LIMIT 1")
+    missing_checksums = storage.conn.execute(
+        "SELECT COUNT(*) FROM schema_migrations WHERE checksum IS NULL"
+    ).fetchone()[0]
+    assert missing_checksums == 0
     storage.close()
 
 

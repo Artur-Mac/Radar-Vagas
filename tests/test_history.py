@@ -7,6 +7,7 @@ import pytest
 
 from radar_vagas.domain.models import (
     IngestionSummary,
+    NormalizedJobLink,
     RawJobRecord,
     RunManifest,
     RunState,
@@ -190,6 +191,30 @@ def test_import_manifest_records_observations(history: HistoricalStorage):
     assert job is not None
     assert job[0] == "active"
     assert job[1] == 0
+
+    observation_id = history.conn.execute(
+        "SELECT observation_id FROM source_job_observations WHERE run_id = 'run_2'"
+    ).fetchone()[0]
+    link = NormalizedJobLink(
+        normalized_job_id="normalized-job-1",
+        source_name="src_a",
+        source_job_id="job_1",
+        observation_id=observation_id,
+        raw_content_hash=rec1.content_hash,
+    )
+    history.save_normalized_job_link(link)
+    stored_link = history.get_normalized_job_links("normalized-job-1")[0]
+    assert stored_link.normalized_job_id == link.normalized_job_id
+    assert stored_link.observation_id == observation_id
+    assert stored_link.raw_content_hash == rec1.content_hash
+
+    with pytest.raises(ValueError, match="provenance"):
+        history.save_normalized_job_link(link.model_copy(update={"raw_content_hash": "0" * 64}))
+
+    with pytest.raises(ValueError, match="cleaned artifact"):
+        history.save_normalized_job_link(
+            link.model_copy(update={"cleaned_id": "missing-cleaned-id"})
+        )
 
 
 def test_import_run_is_atomic(history: HistoricalStorage):

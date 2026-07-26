@@ -1,6 +1,19 @@
 """Unit tests for TextCleaner service."""
 
+from datetime import UTC, datetime
+from pathlib import Path
+
 from radar_vagas.core.cleaner import TextCleaner, clean_html_text, extract_description
+from radar_vagas.core.history_service import HistoryService
+from radar_vagas.domain.models import (
+    IngestionSummary,
+    RawJobRecord,
+    RunManifest,
+    RunState,
+    SourceRunSummary,
+)
+from radar_vagas.infrastructure.history import HistoricalStorage
+from radar_vagas.infrastructure.storage import LocalStorage
 
 
 def test_clean_html_text_decodes_entities_and_strips_tags():
@@ -59,3 +72,43 @@ def test_text_cleaner_reproducible_and_versioned():
     )
     assert result2.cleaned_id == result.cleaned_id
     assert result2.cleaned_text == result.cleaned_text
+
+
+def test_new_cleaner_version_creates_a_new_derived_artifact(tmp_path: Path):
+    history = HistoricalStorage(tmp_path / "history")
+    record = RawJobRecord(
+        source_name="src_clean",
+        source_job_id="job-1",
+        source_url="https://example.com/job-1",
+        raw_payload='{"description":"<p>Build data pipelines</p>"}',
+    )
+    manifest = RunManifest(
+        summary=IngestionSummary(
+            run_id="clean-run",
+            started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC),
+            version="0.1.0",
+            total_sources_requested=1,
+            total_sources_executed=1,
+            global_limit=None,
+            per_source_limit=None,
+            sources={
+                "src_clean": SourceRunSummary(
+                    source_name="src_clean",
+                    state=RunState.success,
+                    records_fetched=1,
+                    records_valid=1,
+                )
+            },
+        )
+    )
+    history.import_run(manifest, [record])
+    service = HistoryService(LocalStorage(tmp_path / "local"), history)
+
+    cleaner_v1 = TextCleaner(transformation_version="1.0.0")
+    cleaner_v2 = TextCleaner(transformation_version="2.0.0")
+    assert service.clean_all_observations(cleaner_v1) == 1
+    assert service.clean_all_observations(cleaner_v1) == 0
+    assert service.clean_all_observations(cleaner_v2) == 1
+    assert history.conn.execute("SELECT COUNT(*) FROM cleaned_source_text").fetchone()[0] == 2
+    history.close()

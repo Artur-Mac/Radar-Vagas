@@ -4,9 +4,17 @@
 
 ---
 
-## 1. Project Goal & Current Status (Época 4 Completed)
+## 1. Project Goal & Current Status (Época 4 closure candidate)
 
-Épocas 1 and 2 established the local foundation and connector framework. Época 3 added multi-source ingestion, run manifests, raw payload persistence, exact in-run deduplication, quarantine, pagination, and deterministic relevance screening. **Época 4 (Raw Data and Historical Storage)** is now fully implemented and hardened, providing a robust historical storage engine powered by DuckDB, SHA-256 Content-Addressed Storage (CAS) blobs, versioned HTML/text cleaning, backup and restore snapshots, retention pruning, migration tampering protection, source governance, and scale benchmarks.
+Épocas 1 and 2 established the local foundation and connector framework. Época 3 added
+multi-source ingestion, run manifests, raw payload persistence, exact in-run deduplication,
+quarantine, pagination, and deterministic relevance screening.
+
+Época 4 now has a broad closure candidate: DuckDB history, SHA-256 Content-Addressed
+Storage (CAS), versioned text cleaning, a persisted normalization-link boundary, quarantine,
+backup/restore, retention preview and pruning, migration checksums, source governance, and
+scale tests. Formal closure still requires operational validation of concurrent backup behavior
+and an end-to-end normalized record in Época 5.
 
 **Completed Features:**
 - **Core Package**: Typed configuration, CLI, formatted logging, and Ollama diagnostics.
@@ -17,9 +25,12 @@
 - **Local Ingestion Storage**: Atomic raw run persistence under `data/runs/<run_id>/`.
 - **Historical Database & CAS**: Idempotent DuckDB metadata storage linked to SHA-256 CAS payload blobs with integrity verification.
 - **Versioned Cleaned Text**: Deterministic HTML tag stripping, entity decoding, and transformation versioning stored in `cleaned_source_text`.
-- **Quarantine & Reprocessing**: Failed raw records captured in `historical_quarantine` with retry support via `history reprocess-quarantine`.
-- **Backup & Restore**: Atomic snapshot backup (DB + Blobs + `backup_manifest.json`) and safe restore with integrity checks.
-- **Retention Controls**: Configurable age and run-count pruning with `--preview` (dry-run) and ref-count blob protection.
+- **Quarantine**: Failed raw records are captured in `historical_quarantine`; failed runs remain
+  retryable by correcting their original files and rerunning `history import`.
+- **Backup & Restore**: Backups are atomically published after copying the checkpointed DB,
+  blobs, and manifest. Do not run a backup concurrently with a historical writer.
+- **Retention Controls**: Configurable age and run-count pruning defaults to a dry-run preview
+  and requires `--force` for deletion.
 - **Migration Hardening**: Migration identity and SHA-256 checksum tracking in `schema_migrations` to prevent migration tampering.
 
 > [!NOTE]
@@ -100,7 +111,7 @@ You can run the application using `radar-vagas` or `uv run radar-vagas`:
   # Clean HTML source text into plain text
   uv run radar-vagas history clean --db-path data/radar_vagas.db
 
-  # Backup historical storage to an atomic snapshot
+  # Publish a local snapshot (do not run concurrently with a history writer)
   uv run radar-vagas history backup --dest-dir backups/snapshot_1 --db-path data/radar_vagas.db
 
   # Restore historical storage from a backup
@@ -112,8 +123,8 @@ You can run the application using `radar-vagas` or `uv run radar-vagas`:
   # Execute retention pruning
   uv run radar-vagas history prune --max-age-days 30 --keep-min-runs 5 --force
 
-  # Reprocess records from historical quarantine
-  uv run radar-vagas history reprocess-quarantine --db-path data/radar_vagas.db
+  # Inspect records in historical quarantine
+  uv run radar-vagas history quarantine --db-path data/radar_vagas.db
   ```
 
 ---
@@ -122,7 +133,7 @@ You can run the application using `radar-vagas` or `uv run radar-vagas`:
 
 All development commands are accessible via `make` shortcuts:
 
-- **Run Automated Test Suite (119 passing tests)**:
+- **Run Automated Test Suite**:
   ```bash
   make test
   # or: uv run pytest
@@ -177,5 +188,5 @@ Radar-Vagas/
 │       └── infrastructure/     # DuckDB Storage & HTTP Policies
 │           ├── history.py      # HistoricalStorage (DuckDB + CAS + Migrations + Backup)
 │           └── http.py         # HttpPolicy, polite_get, retry/backoff
-└── tests/                      # 100% offline test suite (119 passing tests)
+└── tests/                      # 100% offline test suite
 ```

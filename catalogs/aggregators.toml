@@ -9,7 +9,11 @@ rate_limit_delay = 1.0
 description = "Remotive remote job aggregator API"
 access_type = "public"
 authentication_required = false
-terms_url = "https://remotive.com/terms"
+terms_url = "https://remotive.com/remote-jobs/api"
+redistribution_policy = "Public API requires Remotive attribution and source link; third-party job-board redistribution and signup-gated display are prohibited."
+retention_notes = "Local personal analysis only; review current API terms before publishing or sharing derived datasets."
+attribution_required = true
+reviewed_at = "2026-07-26T20:30:00Z"
 
 [[sources]]
 name = "arbeitnow"
@@ -23,3 +27,7 @@ description = "Arbeitnow job board aggregator API"
 access_type = "public"
 authentication_required = false
 terms_url = "https://www.arbeitnow.com/terms"
+redistribution_policy = "Terms restrict copying, commercial use, and public display; do not publish collected payloads."
+retention_notes = "Treat raw material as personal, non-commercial, transitory data and review terms before long-term retention."
+attribution_required = false
+reviewed_at = "2026-07-26T20:30:00Z"

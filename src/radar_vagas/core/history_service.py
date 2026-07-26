@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import uuid
@@ -167,6 +168,9 @@ class HistoryService:
                         failure_phase="import_parse",
                         error_type=type(e).__name__,
                         message=str(e),
+                        raw_content_hash=(
+                            hashlib.sha256(payload.encode("utf-8")).hexdigest() if payload else None
+                        ),
                         raw_payload=payload if payload else None,
                     )
                     self.history.quarantine_record(q_record)
@@ -182,9 +186,15 @@ class HistoryService:
             """
             SELECT o.observation_id, o.content_hash
             FROM source_job_observations o
-            LEFT JOIN cleaned_source_text c ON o.observation_id = c.observation_id
-            WHERE c.cleaned_id IS NULL
-            """
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM cleaned_source_text c
+                WHERE c.observation_id = o.observation_id
+                  AND c.transformation_name = ?
+                  AND c.transformation_version = ?
+            )
+            """,
+            [cleaner.transformation_name, cleaner.transformation_version],
         ).fetchall()
 
         cleaned_count = 0
@@ -196,20 +206,6 @@ class HistoryService:
                 cleaned_count += 1
 
         return cleaned_count
-
-    def reprocess_quarantine(self) -> int:
-        """Attempt to reprocess records in historical quarantine."""
-        records = self.history.get_quarantined_records()
-        reprocessed = 0
-        for rec in records:
-            if rec.raw_payload:
-                try:
-                    parsed = json.loads(rec.raw_payload)
-                    if isinstance(parsed, dict) and "url" in parsed:
-                        reprocessed += 1
-                except (json.JSONDecodeError, TypeError, KeyError) as e:
-                    logger.debug(f"Quarantine item cannot be reprocessed: {e}")
-        return reprocessed
 
     def backup(self, destination_dir: Path) -> BackupManifest:
         return self.history.backup(destination_dir)
