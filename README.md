@@ -11,7 +11,7 @@
 **Completed:**
 - Core package structure under `src/radar_vagas/` with typed configuration, CLI, consistent formatted logging, and Ollama diagnostics.
 - Source Catalog: TOML-driven configuration for all job data sources (`catalogs/`).
-- Connector Framework: Protocol-based connector interface with 4 production-grade implementations (Remotive, Arbeitnow, Greenhouse, Lever).
+- Connector Framework: Protocol-based connector interface with 4 tested implementations (Remotive, Arbeitnow, Greenhouse, Lever).
 - HTTP Policy Layer: Centralised timeouts, retries with exponential backoff, rate limiting, and user-agent management.
 - Connector Registry: Factory-pattern mapping `SourceType → Connector` for extensibility.
 
@@ -190,7 +190,7 @@ Radar-Vagas/
 │   ├── connectors/
 │   ├── data/
 │   └── run_poc.py
-└── tests/                      # Unit test suite (50 tests)
+└── tests/                      # Unit test suite (51 tests)
 ```
 
 ---

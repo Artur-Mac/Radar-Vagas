@@ -44,7 +44,7 @@ Radar-Vagas/
 │           └── llm/
 │               └── ollama_client.py  # Ollama service diagnostics
 ├── poc/                        # Isolated experimental PoC scripts & exploratory code
-└── tests/                      # Automated test suite (pytest, 50 tests)
+└── tests/                      # Automated test suite (pytest, 51 tests)
 ```
 
 ## 3. Core Architectural Decisions
@@ -124,7 +124,7 @@ All connectors use the centralised `polite_get()` function which provides:
 ## 5. Quality & Testing Standards
 
 - **Linter & Formatter**: `ruff` (Line length: 100, target Python: 3.12).
-- **Test Framework**: `pytest`. All 50 tests must pass cleanly.
+- **Test Framework**: `pytest`. All 51 current tests must pass cleanly.
 - **Offline Testing**: All tests use `httpx.MockTransport` for HTTP mocking. Zero network dependency.
 - **Diagnostics**: `radar-vagas doctor` checks Ollama daemon availability and model installation status.
 - **Source Management**: `radar-vagas sources` lists all registered sources from the TOML catalog.

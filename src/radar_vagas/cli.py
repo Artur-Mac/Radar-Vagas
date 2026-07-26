@@ -22,7 +22,7 @@ def main(args: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
 
     # Command: doctor / check-llm
-    subparsers.add_parser("doctor", help="Run local diagnostic check (Ollama, models, database)")
+    subparsers.add_parser("doctor", help="Run local Ollama and model diagnostic checks")
     subparsers.add_parser(
         "check-llm", help="Check local Ollama server connectivity and model status"
     )
