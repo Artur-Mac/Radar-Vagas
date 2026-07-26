@@ -70,8 +70,9 @@ def test_import_all_runs(
     (raw_dir / "job_1.json").write_text(rec1.model_dump_json())
 
     # Run import
-    count = service.import_all_runs()
-    assert count == 1
+    report = service.import_all_runs()
+    assert report.imported_runs == 1
+    assert report.imported_records == 1
 
     # Verify in duckdb
     runs = history.conn.execute("SELECT run_id FROM ingestion_runs").fetchall()
@@ -86,8 +87,8 @@ def test_import_all_runs(
 
     # Try import again, should return 0 (skipped)
     # Wait, the method import_all_runs doesn't strictly return 0 on skip, but it skips. Let's just check no duplication
-    count2 = service.import_all_runs()
-    assert count2 == 0  # we only count imported runs
+    report2 = service.import_all_runs()
+    assert report2.imported_runs == 0  # we only count imported runs
 
     # Test replay
     records = service.get_run_records(run_id)
@@ -133,7 +134,8 @@ def test_imports_legacy_payload_only_run(
         encoding="utf-8",
     )
 
-    assert service.import_all_runs() == 1
+    report = service.import_all_runs()
+    assert report.imported_runs == 1
     records = service.get_run_records(run_id)
     assert len(records) == 1
     assert records[0].source_name == "arbeitnow"
@@ -171,7 +173,8 @@ def test_legacy_import_preserves_raw_payload_bytes(service: HistoryService, stor
     original_payload = '{\n  "url": "https://example.com/jobs/1",\n  "title": "Data Engineer"\n}\n'
     (raw_dir / "src_a-job-1.json").write_text(original_payload, encoding="utf-8")
 
-    assert service.import_all_runs() == 1
+    report = service.import_all_runs()
+    assert report.imported_runs == 1
     assert service.get_run_records(run_id)[0].raw_payload == original_payload
 
 
@@ -218,3 +221,57 @@ def test_replay_uses_url_from_the_original_observation(
     replayed = service.get_run_records("url_run_1")
     assert replayed[0].source_url == "https://example.com/original"
     assert replayed[0].raw_payload == '{"version":1}'
+    change_flags = history.conn.execute(
+        """
+        SELECT changed_since_previous
+        FROM source_job_observations
+        ORDER BY run_id
+        """
+    ).fetchall()
+    assert change_flags == [(False,), (True,)]
+
+
+def test_malformed_record_fails_only_its_run_without_partial_import(
+    service: HistoryService, storage: LocalStorage, history: HistoricalStorage
+):
+    run_id = "malformed_run"
+    raw_dir = storage.runs_dir / run_id / "raw"
+    raw_dir.mkdir(parents=True)
+    manifest = RunManifest(
+        summary=IngestionSummary(
+            run_id=run_id,
+            started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC),
+            duration_seconds=0.0,
+            total_sources_requested=1,
+            total_sources_executed=1,
+            version="0.1.0",
+            global_limit=None,
+            per_source_limit=None,
+            sources={
+                "src_a": SourceRunSummary(
+                    source_name="src_a",
+                    state=RunState.success,
+                    records_fetched=1,
+                    records_valid=1,
+                )
+            },
+        )
+    )
+    (storage.runs_dir / run_id / "manifest.json").write_text(
+        manifest.model_dump_json(), encoding="utf-8"
+    )
+    (raw_dir / "src_a-broken.json").write_text("{not-json", encoding="utf-8")
+
+    report = service.import_all_runs()
+
+    assert report.failed_runs == 1
+    assert report.imported_runs == 0
+    assert report.rejected_records == 1
+    assert report.errors[0].run_dir == run_id
+    assert (
+        history.conn.execute(
+            "SELECT COUNT(*) FROM ingestion_runs WHERE run_id = ?", [run_id]
+        ).fetchone()[0]
+        == 0
+    )

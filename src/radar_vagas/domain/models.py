@@ -150,6 +150,14 @@ class SourceConfig(BaseModel):
     attribution_required: bool | None = None
     reviewed_at: datetime | None = None
 
+    @model_validator(mode="after")
+    def validate_governance(self) -> "SourceConfig":
+        if self.authentication_required and not self.credential_env_var:
+            raise ValueError("credential_env_var must be set if authentication_required is True")
+        if self.access_type in ("authenticated", "paid") and not self.terms_url:
+            raise ValueError(f"terms_url must be provided for access_type '{self.access_type}'")
+        return self
+
 
 class CollectionError(BaseModel):
     """Structured error captured during connector execution."""

@@ -70,6 +70,17 @@ def test_empty_catalog(tmp_path: Path, offline_client: httpx.Client) -> None:
     assert len(manifest.summary.sources) == 0
 
 
+def test_scheduling_quantum_must_be_positive(tmp_path: Path, offline_client: httpx.Client) -> None:
+    runner = ConnectorRunner(
+        registry=ConnectorRegistry(),
+        storage=LocalStorage(tmp_path),
+        client=offline_client,
+    )
+
+    with pytest.raises(ValueError, match="scheduling_quantum"):
+        runner.run([], scheduling_quantum=0)
+
+
 def test_successful_source_and_exact_deduplication(
     tmp_path: Path, offline_client: httpx.Client
 ) -> None:

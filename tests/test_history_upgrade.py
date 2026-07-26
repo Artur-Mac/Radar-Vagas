@@ -1,0 +1,46 @@
+from pathlib import Path
+
+import duckdb
+import pytest
+
+from radar_vagas.infrastructure.history import MIGRATIONS, HistoricalStorage
+
+
+def test_migration_safety(tmp_path: Path):
+    db_path = tmp_path / "db" / "history.duckdb"
+    db_path.parent.mkdir(parents=True)
+
+    # Simulate an old DB with only first 3 migrations
+    conn = duckdb.connect(str(db_path))
+    for i in range(3):
+        conn.execute(MIGRATIONS[i])
+        if i > 0:
+            conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", [i])
+        else:
+            conn.execute("INSERT INTO schema_migrations (version) VALUES (0)")
+    conn.close()
+
+    # Initialize storage, which should apply remaining migrations
+    storage = HistoricalStorage(tmp_path)
+
+    # Check that schema version is now up-to-date
+    res = storage.conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+    assert res == len(MIGRATIONS) - 1
+
+    # Check that new column exists
+    storage.conn.execute("SELECT application_version FROM ingestion_runs LIMIT 1")
+    storage.close()
+
+
+def test_future_database_version(tmp_path: Path):
+    db_path = tmp_path / "db" / "history.duckdb"
+    db_path.parent.mkdir(parents=True)
+
+    conn = duckdb.connect(str(db_path))
+    conn.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY)")
+    # Set to a future version
+    conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", [len(MIGRATIONS) + 5])
+    conn.close()
+
+    with pytest.raises(RuntimeError, match="newer than supported"):
+        HistoricalStorage(tmp_path)

@@ -1,8 +1,8 @@
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-import duckdb
 import pytest
 
 from radar_vagas.domain.models import (
@@ -34,8 +34,6 @@ def test_migrations_create_tables(history: HistoricalStorage):
 
 def test_write_and_read_blob(history: HistoricalStorage):
     payload = json.dumps({"test": "data"}, sort_keys=True)
-    import hashlib
-
     content_hash = hashlib.sha256(payload.encode()).hexdigest()
 
     history.write_blob(content_hash, payload)
@@ -59,6 +57,27 @@ def test_blob_rejects_invalid_path_and_hash(history: HistoricalStorage):
 
     with pytest.raises(ValueError, match="Blob hash mismatch"):
         history.write_blob("0" * 64, '{"different":true}')
+
+
+def test_integrity_report_detects_corrupt_and_orphan_files(history: HistoricalStorage):
+    payload = '{"title":"Data Engineer"}'
+    content_hash = hashlib.sha256(payload.encode()).hexdigest()
+    history.write_blob(content_hash, payload)
+
+    healthy_report = history.verify_integrity()
+    assert healthy_report.orphan_database_blobs == (content_hash,)
+
+    history._get_blob_path(content_hash).write_text("corrupt", encoding="utf-8")
+    orphan_hash = hashlib.sha256(b"orphan").hexdigest()
+    orphan_path = history._get_blob_path(orphan_hash)
+    orphan_path.parent.mkdir(parents=True)
+    orphan_path.write_text("orphan", encoding="utf-8")
+
+    report = history.verify_integrity()
+
+    assert report.is_valid is False
+    assert report.corrupt_files == (content_hash,)
+    assert report.orphan_files == (orphan_hash,)
 
 
 def test_explicit_database_path(tmp_path: Path):
@@ -154,6 +173,15 @@ def test_import_manifest_records_observations(history: HistoricalStorage):
         "run_2",
         "5b4a9646a2f29587a8753dbd85691301d7010595e44c0a910d9cb2ae20ad132a",
     )
+    media_type, changed = history.conn.execute(
+        """
+        SELECT payload_media_type, changed_since_previous
+        FROM source_job_observations
+        WHERE run_id = 'run_2'
+        """
+    ).fetchone()
+    assert media_type == "text/plain"
+    assert changed is False
 
     # Verify Source Job
     job = history.conn.execute(
@@ -193,7 +221,7 @@ def test_import_run_is_atomic(history: HistoricalStorage):
         )
     )
 
-    with pytest.raises(duckdb.ConstraintException):
+    with pytest.raises(ValueError, match="Duplicate record identity"):
         history.import_run(manifest, [record, record])
 
     assert (

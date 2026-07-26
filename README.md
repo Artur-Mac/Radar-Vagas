@@ -4,14 +4,16 @@
 
 ---
 
-## 1. Project Goal & Current Status (Época 4 in progress)
+## 1. Project Goal & Current Status (Época 4 hardening)
 
 Épocas 1 and 2 established the local foundation and connector framework. Época 3 adds
 multi-source ingestion, run manifests, raw payload persistence, exact in-run deduplication,
-quarantine, pagination, and deterministic relevance screening. The current Época 4 foundation
-adds content-addressed raw storage, DuckDB observations, source-job lifecycle tracking, and
-offline replay. Época 4 is not complete yet; normalization and cleaned/enriched layers remain
-separate future work.
+quarantine, pagination, and deterministic relevance screening. Época 4 now provides a substantial
+historical foundation with DuckDB metadata, CAS blob storage, source-job lifecycle tracking,
+import reporting, migrations, integrity diagnostics, and configurable fairer scheduling.
+
+Época 4 remains in hardening until cleaned source text, normalized-record linkage, complete
+integrity verification, and retention/backup controls satisfy the roadmap acceptance criteria.
 
 **Completed:**
 - Core package structure under `src/radar_vagas/` with typed configuration, CLI, consistent formatted logging, and Ollama diagnostics.
@@ -23,6 +25,8 @@ separate future work.
 - Local Run Storage: Atomic, no-overwrite persistence under `data/runs/<run_id>/`.
 - Historical Foundation: Idempotent and transactional import into DuckDB plus SHA-256
   content-addressed blobs, including replay of legacy Época 3 runs.
+- Governance & Quality: Built-in SourceConfig validation for credentials and usage terms.
+- Fair Ingestion Scheduling: Sources rotate dynamically using a scheduling quantum.
 
 > [!NOTE]
 > **PoC Technical Review Note**: The initial PoC proved end-to-end data flow (ingestion, raw storage, canonical schema mapping, DuckDB analytics). However, per [TECHNICAL_REVIEW.md](poc/TECHNICAL_REVIEW.md), the PoC report does **NOT** constitute proof of local LLM quality (H4), LLM latency/throughput (H5), fuzzy deduplication (H6), or recommendation utility (H7) until a manually labeled evaluation dataset is executed.
@@ -93,10 +97,13 @@ You can run the application using the `radar-vagas` command or `uv run radar-vag
   uv run radar-vagas runs show <run-id>
   ```
 
-- **Import local runs and replay one without network access**:
+- **Manage historical data (Import, Init, Stats, Verify, Replay)**:
   ```bash
+  uv run radar-vagas history init --db-path data/radar_vagas.db
   uv run radar-vagas history import --output-dir data --db-path data/radar_vagas.db
-  uv run radar-vagas history replay <run-id> --db-path data/radar_vagas.db
+  uv run radar-vagas history stats --db-path data/radar_vagas.db
+  uv run radar-vagas history verify --db-path data/radar_vagas.db
+  uv run radar-vagas history replay <run-id> --db-path data/radar_vagas.db --limit 10 --jsonl
   ```
 
 The `doctor` command inspects whether the Ollama HTTP daemon is reachable and whether the configured model is installed locally. If Ollama is offline, it outputs a clear explanatory status message without crashing.
@@ -228,8 +235,8 @@ Radar-Vagas/
 - **Heuristic Engine vs. LLM**: The PoC uses deterministic rules for some extraction and classification tasks. These rules do not generate new prose, but can still produce false positives and false negatives and require evaluation against labeled data.
 - **LLM Inference**: LLM enrichment via Ollama is optional and deferred. LLM quality, latency percentiles, and structured extraction precision will be formally evaluated in future epics using labeled ground-truth fixtures per [TECHNICAL_REVIEW.md](poc/TECHNICAL_REVIEW.md).
 - **Historical storage is an Época 4 foundation**: cross-run observations, `first_seen`,
-  `last_seen`, conservative closure detection, and offline replay are implemented. Explicit
-  change events, richer source-run metadata, import failure summaries, retention controls,
-  backup/restore, and performance tuning for large backfills are still pending.
+  `last_seen`, conservative closure detection, schema migrations, and offline replay are
+  implemented. Cleaned-text storage, normalized-record linkage, filesystem-complete integrity
+  verification, retention controls, and tested backup/restore remain pending.
 - **Relevance is exploratory**: the current regex is intentionally broad and must not be read as
   a validated count of suitable Data/AI roles.

@@ -71,6 +71,12 @@ def main(args: list[str] | None = None) -> int:
         "--per-source-limit", type=positive_int, help="Limit of records per source"
     )
     collect_parser.add_argument(
+        "--scheduling-quantum",
+        type=positive_int,
+        default=25,
+        help="Maximum records requested from one source before rotating (default: 25)",
+    )
+    collect_parser.add_argument(
         "--catalog-dir", type=str, default="catalogs", help="Path to catalog directory"
     )
     collect_parser.add_argument(
@@ -108,6 +114,25 @@ def main(args: list[str] | None = None) -> int:
     )
     history_replay.add_argument("run_id", type=str, help="The ID of the run to replay")
     history_replay.add_argument("--db-path", type=str, help="Path to DuckDB database")
+    history_replay.add_argument("--limit", type=positive_int, help="Limit number of output records")
+    replay_output = history_replay.add_mutually_exclusive_group()
+    replay_output.add_argument("--json", action="store_true", help="Output as JSON array")
+    replay_output.add_argument("--jsonl", action="store_true", help="Output as JSON lines")
+
+    history_init = history_subparsers.add_parser(
+        "init", help="Initialize historical database schema"
+    )
+    history_init.add_argument("--db-path", type=str, help="Path to DuckDB database")
+
+    history_stats = history_subparsers.add_parser(
+        "stats", help="Show statistics of the historical database"
+    )
+    history_stats.add_argument("--db-path", type=str, help="Path to DuckDB database")
+
+    history_verify = history_subparsers.add_parser(
+        "verify", help="Verify integrity of historical data and CAS blobs"
+    )
+    history_verify.add_argument("--db-path", type=str, help="Path to DuckDB database")
 
     parsed_args = parser.parse_args(args)
 
@@ -153,7 +178,11 @@ def main(args: list[str] | None = None) -> int:
             print(f"❌ Catalog directory not found: {catalog_dir}")
             return 1
 
-        sources = load_catalog(catalog_dir)
+        try:
+            sources = load_catalog(catalog_dir)
+        except ValueError as e:
+            print(f"❌ Catalog Validation Error:\n{e}")
+            return 1
         if parsed_args.active_only:
             sources = get_active_sources(sources)
 
@@ -182,7 +211,12 @@ def main(args: list[str] | None = None) -> int:
             print(f"❌ Catalog directory not found: {catalog_dir}")
             return 1 if parsed_args.fail_fast else 0
 
-        sources = load_catalog(catalog_dir)
+        try:
+            sources = load_catalog(catalog_dir)
+        except ValueError as e:
+            print(f"❌ Catalog Validation Error:\n{e}")
+            return 1
+
         sources = get_active_sources(sources)
 
         if parsed_args.source:
@@ -212,6 +246,7 @@ def main(args: list[str] | None = None) -> int:
                 configs=sources,
                 global_limit=parsed_args.limit,
                 per_source_limit=parsed_args.per_source_limit,
+                scheduling_quantum=parsed_args.scheduling_quantum,
                 fail_fast=parsed_args.fail_fast,
                 persist=not parsed_args.dry_run,
             )
@@ -298,31 +333,117 @@ def main(args: list[str] | None = None) -> int:
             service = HistoryService(storage, history)
 
             print(f"📦 Importing runs from {storage.runs_dir} into historical storage...")
-            count = service.import_all_runs()
+            report = service.import_all_runs()
             history.close()
-            print(f"✅ Imported {count} run(s) successfully.")
+
+            print("\n" + "=" * 60)
+            print("📊 IMPORT REPORT")
+            print("=" * 60)
+            print(f"Discovered Runs:  {report.discovered_runs}")
+            print(f"Imported Runs:    {report.imported_runs}")
+            print(f"Skipped Runs:     {report.skipped_runs}")
+            print(f"Failed Runs:      {report.failed_runs}")
+            print(f"Imported Records: {report.imported_records}")
+            print(f"Rejected Records: {report.rejected_records}")
+
+            if report.errors:
+                print("\nErrors:")
+                for err in report.errors:
+                    print(f"  - [{err.run_dir}] {err.error_type}: {err.message}")
+
+            print("=" * 60 + "\n")
+
+            if report.discovered_runs == 0:
+                return 0
+            if report.failed_runs == 0:
+                return 0
+            if report.imported_runs == 0 and report.failed_runs > 0:
+                return 1
+            if report.imported_runs > 0 and report.failed_runs > 0:
+                return 2
+
             return 0
 
         if parsed_args.history_command == "replay":
             history = HistoricalStorage(Path(db_path).parent, db_path=Path(db_path))
-            # Dummy storage since we only replay
             service = HistoryService(LocalStorage(Path("data")), history)
 
-            print(f"⏪ Replaying run {parsed_args.run_id}...")
+            run_exists = service.run_exists(parsed_args.run_id)
             records = service.get_run_records(parsed_args.run_id)
             history.close()
+
+            if not run_exists:
+                print(f"❌ Run not imported: {parsed_args.run_id}.")
+                return 1
+
+            total_records = len(records)
+            if parsed_args.limit:
+                records = records[: parsed_args.limit]
+
+            if parsed_args.json or parsed_args.jsonl:
+                import json
+
+                if parsed_args.json:
+                    print(json.dumps([r.model_dump(mode="json") for r in records], indent=2))
+                else:
+                    for r in records:
+                        print(json.dumps(r.model_dump(mode="json")))
+                return 0
 
             print("\n" + "=" * 60)
             print(f"🔄 REPLAY RESULTS: {parsed_args.run_id}")
             print("=" * 60)
-            if not records:
-                print("  No records found or run not imported.")
-            else:
-                for rec in records:
-                    print(f"  • {rec.source_name:<15} | Job ID: {rec.source_job_id}")
-            print(f"\n  Total Records: {len(records)}")
+            displayed_records = records if parsed_args.limit else records[:20]
+            for rec in displayed_records:
+                print(f"  • {rec.source_name:<15} | Job ID: {rec.source_job_id}")
+            print(f"\n  Total Records: {total_records}")
+            if len(displayed_records) < total_records:
+                print(f"  Showing:       {len(displayed_records)} (use --limit to change)")
             print("=" * 60 + "\n")
             return 0
+
+        if parsed_args.history_command == "init":
+            history = HistoricalStorage(Path(db_path).parent, db_path=Path(db_path))
+            print(f"✅ Historical storage initialized at {history.db_path}")
+            history.close()
+            return 0
+
+        if parsed_args.history_command == "stats":
+            history = HistoricalStorage(Path(db_path).parent, db_path=Path(db_path))
+            runs = history.conn.execute("SELECT COUNT(*) FROM ingestion_runs").fetchone()[0]
+            jobs = history.conn.execute("SELECT COUNT(*) FROM source_jobs").fetchone()[0]
+            obs = history.conn.execute("SELECT COUNT(*) FROM source_job_observations").fetchone()[0]
+            blobs = history.conn.execute("SELECT COUNT(*) FROM raw_blobs").fetchone()[0]
+            history.close()
+
+            print("\n" + "=" * 60)
+            print("📈 HISTORICAL STORAGE STATS")
+            print("=" * 60)
+            print(f"  Runs:           {runs}")
+            print(f"  Source Jobs:    {jobs}")
+            print(f"  Observations:   {obs}")
+            print(f"  CAS Blobs:      {blobs}")
+            print("=" * 60 + "\n")
+            return 0
+
+        if parsed_args.history_command == "verify":
+            history = HistoricalStorage(Path(db_path).parent, db_path=Path(db_path))
+            report = history.verify_integrity()
+            history.close()
+
+            print("\n" + "=" * 60)
+            print("🔍 HISTORICAL STORAGE VERIFICATION")
+            print("=" * 60)
+            print(f"  Database Blobs:       {report.total_database_blobs}")
+            print(f"  Missing Files:        {len(report.missing_files)}")
+            print(f"  Corrupt Files:        {len(report.corrupt_files)}")
+            print(f"  Missing Metadata:     {len(report.missing_metadata)}")
+            print(f"  Orphan DB Blobs:      {len(report.orphan_database_blobs)}")
+            print(f"  Orphan Files:         {len(report.orphan_files)}")
+            print(f"  Invalid Blob Paths:   {len(report.invalid_blob_paths)}")
+            print("=" * 60 + "\n")
+
+            return 0 if report.is_valid else 1
 
     parser.print_help()
     return 0

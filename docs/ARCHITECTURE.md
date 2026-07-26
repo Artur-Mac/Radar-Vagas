@@ -1,11 +1,11 @@
-# Radar-Vagas Architecture Document (Época 4 foundation)
+# Radar-Vagas Architecture Document (Época 4 hardening)
 
 ## 1. Overview
 
 **Radar-Vagas** is a local-first job market intelligence platform. Época 3 added a
-run-scoped ingestion service and local raw storage. The current Época 4 foundation adds
-cross-run observations in DuckDB and content-addressed raw blobs while preserving offline
-operation and compatibility with the existing run folders.
+run-scoped ingestion service and local raw storage. The current Época 4 layer provides
+cross-run observations in DuckDB, robust content-addressed raw blobs, schema migrations,
+and fair ingestion scheduling, while preserving offline operation.
 
 ## 2. Directory Layout & Layer Separation
 
@@ -153,18 +153,20 @@ data/runs/<run_id>/
 Writes use a temporary file plus an atomic no-overwrite link. `--dry-run` computes the same
 manifest in memory without creating files or directories.
 
-## 7. Historical Storage Foundation (Época 4 in progress)
+## 7. Historical Storage Layer (Época 4 in progress)
 
 `HistoryService` imports both Época 3 payload-only files and newer record envelopes.
 `HistoricalStorage` stores immutable payload bytes under a SHA-256 content-addressed layout and
 keeps runs, source executions, source jobs, and observations in DuckDB. A run import is
-idempotent and its database changes are transactional. Every observation retains the hash and
-source URL needed for deterministic offline replay.
+idempotent and its database changes are transactional. Every observation retains the hash,
+source URL, payload media type, and source type needed for deterministic offline replay.
 
 Lifecycle transitions are intentionally conservative: only a source run marked
-`coverage_complete` can increment missing-run counters, and a job is closed after three
-consecutive complete misses. A later observation marks it as reopened.
+`coverage_complete` can increment missing-run counters, and a job is closed after a configured
+threshold of consecutive complete misses. A later observation marks it as reopened.
+The schema applies sequential migrations and records the application version. The CLI includes
+`import`, `replay`, `stats`, `verify`, and `init` commands.
 
-The implementation is a foundation, not completion of Época 4. Explicit change-event
-classification, cleaned text, normalized/enriched table separation, richer import reporting,
-retention and backup controls, and efficient large backfills remain pending.
+This is not yet the complete Época 4 outcome described in `docs/Epochs.md`: cleaned source text,
+raw-to-normalized linkage, full database/filesystem reconciliation, retention controls, and a
+tested backup/restore procedure are still required.

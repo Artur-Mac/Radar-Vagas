@@ -60,7 +60,9 @@ def test_cli_history_import(run_dir: Path, capsys):
 
     captured = capsys.readouterr()
     assert "Importing runs from" in captured.out
-    assert "Imported 1 run(s) successfully" in captured.out
+    assert "IMPORT REPORT" in captured.out
+    assert "Imported Runs:    1" in captured.out
+    assert "Imported Records: 1" in captured.out
 
 
 def test_cli_history_replay(run_dir: Path, capsys):
@@ -75,7 +77,44 @@ def test_cli_history_replay(run_dir: Path, capsys):
     assert code == 0
 
     captured = capsys.readouterr()
-    assert "Replaying run test_run_123" in captured.out
+    assert "REPLAY RESULTS" in captured.out
     assert "src_a" in captured.out
     assert "job_1" in captured.out
     assert "Total Records: 1" in captured.out
+
+
+def test_cli_history_replay_not_found(run_dir: Path, capsys):
+    db_path = run_dir / "db" / "history.duckdb"
+    code = main(["history", "replay", "non_existent", "--db-path", str(db_path)])
+    assert code == 1
+
+
+def test_cli_history_init(run_dir: Path, capsys):
+    db_path = run_dir / "db" / "history.duckdb"
+    code = main(["history", "init", "--db-path", str(db_path)])
+    assert code == 0
+    captured = capsys.readouterr()
+    assert "Historical storage initialized" in captured.out
+
+
+def test_cli_history_stats(run_dir: Path, capsys):
+    db_path = run_dir / "db" / "history.duckdb"
+    main(["history", "import", "--output-dir", str(run_dir / "data"), "--db-path", str(db_path)])
+    code = main(["history", "stats", "--db-path", str(db_path)])
+    assert code == 0
+    captured = capsys.readouterr()
+    assert "HISTORICAL STORAGE STATS" in captured.out
+    assert "Runs:           1" in captured.out
+    assert "Source Jobs:    1" in captured.out
+
+
+def test_cli_history_verify(run_dir: Path, capsys):
+    db_path = run_dir / "db" / "history.duckdb"
+    main(["history", "import", "--output-dir", str(run_dir / "data"), "--db-path", str(db_path)])
+    code = main(["history", "verify", "--db-path", str(db_path)])
+    assert code == 0
+    captured = capsys.readouterr()
+    assert "HISTORICAL STORAGE VERIFICATION" in captured.out
+    assert "Missing Files:        0" in captured.out
+    assert "Corrupt Files:        0" in captured.out
+    assert "Orphan Files:         0" in captured.out

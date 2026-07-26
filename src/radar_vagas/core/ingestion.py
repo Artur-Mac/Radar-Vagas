@@ -72,6 +72,7 @@ class ConnectorRunner:
         *,
         global_limit: int | None = None,
         per_source_limit: int | None = None,
+        scheduling_quantum: int = 100,
         fail_fast: bool = False,
         persist: bool = True,
     ) -> RunManifest:
@@ -80,6 +81,8 @@ class ConnectorRunner:
             raise ValueError("global_limit must be a positive integer")
         if per_source_limit is not None and per_source_limit <= 0:
             raise ValueError("per_source_limit must be a positive integer")
+        if scheduling_quantum <= 0:
+            raise ValueError("scheduling_quantum must be a positive integer")
 
         run_id = f"run_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         start_time = time.monotonic()
@@ -152,7 +155,7 @@ class ConnectorRunner:
                     state.is_done = True
                     continue
 
-                limit = 100
+                limit = scheduling_quantum
                 if per_source_limit is not None:
                     limit = min(limit, per_source_limit - state.source_fetched)
                 if global_limit is not None:

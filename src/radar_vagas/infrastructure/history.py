@@ -1,9 +1,11 @@
 import hashlib
+import json
 import logging
 import os
 import re
 import tempfile
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 import duckdb
@@ -12,6 +14,31 @@ from radar_vagas.domain.models import RawJobRecord, RunManifest
 
 logger = logging.getLogger(__name__)
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True)
+class IntegrityReport:
+    total_database_blobs: int
+    missing_files: tuple[str, ...]
+    corrupt_files: tuple[str, ...]
+    missing_metadata: tuple[str, ...]
+    orphan_database_blobs: tuple[str, ...]
+    orphan_files: tuple[str, ...]
+    invalid_blob_paths: tuple[str, ...]
+
+    @property
+    def is_valid(self) -> bool:
+        return not any(
+            (
+                self.missing_files,
+                self.corrupt_files,
+                self.missing_metadata,
+                self.orphan_database_blobs,
+                self.orphan_files,
+                self.invalid_blob_paths,
+            )
+        )
+
 
 MIGRATIONS = [
     """
@@ -77,6 +104,14 @@ MIGRATIONS = [
     """
     ALTER TABLE source_job_observations ADD COLUMN source_url VARCHAR;
     """,
+    """
+    ALTER TABLE source_job_observations ADD COLUMN source_type VARCHAR;
+    ALTER TABLE source_job_observations ADD COLUMN payload_media_type VARCHAR DEFAULT 'application/json';
+    ALTER TABLE source_job_observations ADD COLUMN changed_since_previous BOOLEAN DEFAULT FALSE;
+    """,
+    """
+    ALTER TABLE ingestion_runs ADD COLUMN application_version VARCHAR;
+    """,
 ]
 
 
@@ -110,13 +145,17 @@ class HistoricalStorage:
         for i, migration in enumerate(MIGRATIONS):
             if i > current_version:
                 logger.info(f"Applying migration version {i}")
-                with self.conn.cursor() as cursor:
-                    cursor.execute(migration)
+                self.conn.execute("BEGIN TRANSACTION")
+                try:
+                    self.conn.execute(migration)
                     if i > 0:
-                        cursor.execute("INSERT INTO schema_migrations (version) VALUES (?)", [i])
+                        self.conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", [i])
                     else:
-                        # For version 0 (the schema_migrations table itself)
-                        cursor.execute("INSERT INTO schema_migrations (version) VALUES (0)")
+                        self.conn.execute("INSERT INTO schema_migrations (version) VALUES (0)")
+                    self.conn.execute("COMMIT")
+                except BaseException:
+                    self.conn.execute("ROLLBACK")
+                    raise
 
     def _get_blob_path(self, content_hash: str) -> Path:
         if not _SHA256_PATTERN.fullmatch(content_hash):
@@ -181,8 +220,67 @@ class HistoricalStorage:
             raise ValueError(f"Stored blob failed integrity check: {content_hash}")
         return payload
 
-    def import_run(self, manifest: RunManifest, records: list[RawJobRecord]) -> None:
+    def verify_integrity(self) -> IntegrityReport:
+        database_hashes = {
+            row[0] for row in self.conn.execute("SELECT content_hash FROM raw_blobs").fetchall()
+        }
+        observation_hashes = {
+            row[0]
+            for row in self.conn.execute(
+                "SELECT DISTINCT content_hash FROM source_job_observations"
+            ).fetchall()
+        }
+
+        missing_files: list[str] = []
+        corrupt_files: list[str] = []
+        for content_hash in sorted(database_hashes):
+            blob_path = self._get_blob_path(content_hash)
+            if not blob_path.is_file():
+                missing_files.append(content_hash)
+                continue
+            if hashlib.sha256(blob_path.read_bytes()).hexdigest() != content_hash:
+                corrupt_files.append(content_hash)
+
+        filesystem_hashes: set[str] = set()
+        invalid_blob_paths: list[str] = []
+        if self.blobs_dir.exists():
+            for blob_path in self.blobs_dir.rglob("*.json"):
+                content_hash = blob_path.stem
+                if not _SHA256_PATTERN.fullmatch(content_hash) or blob_path != self._get_blob_path(
+                    content_hash
+                ):
+                    invalid_blob_paths.append(str(blob_path.relative_to(self.blobs_dir)))
+                    continue
+                filesystem_hashes.add(content_hash)
+
+        return IntegrityReport(
+            total_database_blobs=len(database_hashes),
+            missing_files=tuple(missing_files),
+            corrupt_files=tuple(corrupt_files),
+            missing_metadata=tuple(sorted(observation_hashes - database_hashes)),
+            orphan_database_blobs=tuple(sorted(database_hashes - observation_hashes)),
+            orphan_files=tuple(sorted(filesystem_hashes - database_hashes)),
+            invalid_blob_paths=tuple(sorted(invalid_blob_paths)),
+        )
+
+    def import_run(
+        self, manifest: RunManifest, records: list[RawJobRecord], missing_runs_threshold: int = 3
+    ) -> None:
         summary = manifest.summary
+        if missing_runs_threshold <= 0:
+            raise ValueError("missing_runs_threshold must be a positive integer")
+        seen_record_keys: set[tuple[str, str]] = set()
+        for record in records:
+            if record.source_name not in summary.sources:
+                raise ValueError(
+                    f"Record source {record.source_name!r} is not present in the run manifest"
+                )
+            record_key = (record.source_name, record.source_job_id)
+            if record_key in seen_record_keys:
+                raise ValueError(
+                    f"Duplicate record identity in run: {record.source_name}/{record.source_job_id}"
+                )
+            seen_record_keys.add(record_key)
 
         # Check idempotency
         res = self.conn.execute(
@@ -202,8 +300,8 @@ class HistoricalStorage:
                 """
                 INSERT INTO ingestion_runs (
                     run_id, started_at, finished_at, duration_seconds,
-                    total_sources_executed, global_limit, per_source_limit
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    total_sources_executed, global_limit, per_source_limit, application_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     summary.run_id,
@@ -213,6 +311,7 @@ class HistoricalStorage:
                     summary.total_sources_executed,
                     summary.global_limit,
                     summary.per_source_limit,
+                    summary.version,
                 ],
             )
 
@@ -236,21 +335,78 @@ class HistoricalStorage:
             # 3. Process Records
             observed_jobs = {src_name: set() for src_name in summary.sources}
 
+            # Pre-fetch existing source jobs to calculate changed_since_previous and avoid individual selects
+            existing_jobs = {}
+            if records:
+                source_names = sorted({record.source_name for record in records})
+                # Using a single query to get all existing jobs for the relevant sources
+                # We can construct an IN clause or just fetch all for those sources since they shouldn't be millions per run yet.
+                # A better approach is to use a temp table or just fetch them.
+                placeholders = ",".join(["?"] * len(source_names))
+                rows = cursor.execute(
+                    f"SELECT source_name, source_job_id, status, content_hash FROM source_jobs WHERE source_name IN ({placeholders})",
+                    source_names,
+                ).fetchall()
+                for sn, sjid, st, ch in rows:
+                    existing_jobs[(sn, sjid)] = (st, ch)
+
+            obs_batch = []
+            jobs_insert_batch = []
+            jobs_update_batch = []
+
             for record in records:
-                # Write CAS blob
+                # Write CAS blob (This has its own IGNORE logic which is fine to keep per-record for now,
+                # as it renames files on disk)
                 self.write_blob(record.content_hash, record.raw_payload)
 
-                # Insert observation
                 obs_id = str(uuid.uuid4())
-                observed_at = summary.started_at.isoformat()
+                observed_at = record.collected_at.isoformat()
 
-                cursor.execute(
-                    """
-                    INSERT INTO source_job_observations (
-                        observation_id, source_name, source_job_id, run_id, content_hash,
-                        observed_at, source_url
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
+                existing = existing_jobs.get((record.source_name, record.source_job_id))
+                changed_since_previous = False
+
+                if not existing:
+                    # New job
+                    jobs_insert_batch.append(
+                        [
+                            record.source_name,
+                            record.source_job_id,
+                            record.source_url,
+                            record.content_hash,
+                            observed_at,
+                            observed_at,
+                            0,
+                            "active",
+                        ]
+                    )
+                    changed_since_previous = False
+                else:
+                    # Existing job
+                    old_status, old_hash = existing
+                    new_status = (
+                        "reopened" if old_status in ("possibly_inactive", "closed") else "active"
+                    )
+                    changed_since_previous = old_hash != record.content_hash
+
+                    jobs_update_batch.append(
+                        [
+                            record.source_url,
+                            record.content_hash,
+                            observed_at,
+                            new_status,
+                            record.source_name,
+                            record.source_job_id,
+                        ]
+                    )
+
+                source_type_val = record.source_type.value if record.source_type else None
+                try:
+                    json.loads(record.raw_payload)
+                    payload_media_type = "application/json"
+                except (TypeError, ValueError):
+                    payload_media_type = "text/plain"
+
+                obs_batch.append(
                     [
                         obs_id,
                         record.source_name,
@@ -259,58 +415,50 @@ class HistoricalStorage:
                         record.content_hash,
                         observed_at,
                         record.source_url,
-                    ],
+                        source_type_val,
+                        payload_media_type,
+                        changed_since_previous,
+                    ]
                 )
-
-                # Upsert source_job
-                existing = cursor.execute(
-                    "SELECT status FROM source_jobs WHERE source_name = ? AND source_job_id = ?",
-                    [record.source_name, record.source_job_id],
-                ).fetchone()
-
-                if not existing:
-                    cursor.execute(
-                        """
-                        INSERT INTO source_jobs (
-                            source_name, source_job_id, source_url, content_hash,
-                            first_seen_at, last_seen_at, missing_complete_runs, status
-                        ) VALUES (?, ?, ?, ?, ?, ?, 0, 'active')
-                        """,
-                        [
-                            record.source_name,
-                            record.source_job_id,
-                            record.source_url,
-                            record.content_hash,
-                            observed_at,
-                            observed_at,
-                        ],
-                    )
-                else:
-                    new_status = (
-                        "reopened" if existing[0] in ("possibly_inactive", "closed") else "active"
-                    )
-                    cursor.execute(
-                        """
-                        UPDATE source_jobs
-                        SET source_url = ?, content_hash = ?, last_seen_at = ?, missing_complete_runs = 0, status = ?
-                        WHERE source_name = ? AND source_job_id = ?
-                        """,
-                        [
-                            record.source_url,
-                            record.content_hash,
-                            observed_at,
-                            new_status,
-                            record.source_name,
-                            record.source_job_id,
-                        ],
-                    )
 
                 observed_jobs[record.source_name].add(record.source_job_id)
 
+            if jobs_insert_batch:
+                cursor.executemany(
+                    """
+                    INSERT INTO source_jobs (
+                        source_name, source_job_id, source_url, content_hash,
+                        first_seen_at, last_seen_at, missing_complete_runs, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    jobs_insert_batch,
+                )
+
+            if jobs_update_batch:
+                cursor.executemany(
+                    """
+                    UPDATE source_jobs
+                    SET source_url = ?, content_hash = ?, last_seen_at = ?, missing_complete_runs = 0, status = ?
+                    WHERE source_name = ? AND source_job_id = ?
+                    """,
+                    jobs_update_batch,
+                )
+
+            if obs_batch:
+                cursor.executemany(
+                    """
+                    INSERT INTO source_job_observations (
+                        observation_id, source_name, source_job_id, run_id, content_hash,
+                        observed_at, source_url, source_type, payload_media_type, changed_since_previous
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    obs_batch,
+                )
+
             # 4. Handle Missing Coverage
+            missing_updates = []
             for src_name, src_summary in summary.sources.items():
                 if getattr(src_summary, "coverage_complete", False):
-                    # Find active jobs for this source NOT observed in this run
                     unseen = cursor.execute(
                         """
                         SELECT source_job_id, missing_complete_runs
@@ -323,19 +471,23 @@ class HistoricalStorage:
                     for job_id, missing_count in unseen:
                         if job_id not in observed_jobs[src_name]:
                             new_missing = missing_count + 1
-                            if new_missing >= 3:
+                            if new_missing >= missing_runs_threshold:
                                 new_status = "closed"
                             else:
                                 new_status = "possibly_inactive"
 
-                            cursor.execute(
-                                """
-                                UPDATE source_jobs
-                                SET missing_complete_runs = ?, status = ?
-                                WHERE source_name = ? AND source_job_id = ?
-                                """,
-                                [new_missing, new_status, src_name, job_id],
-                            )
+                            missing_updates.append([new_missing, new_status, src_name, job_id])
+
+            if missing_updates:
+                cursor.executemany(
+                    """
+                    UPDATE source_jobs
+                    SET missing_complete_runs = ?, status = ?
+                    WHERE source_name = ? AND source_job_id = ?
+                    """,
+                    missing_updates,
+                )
+
             self.conn.execute("COMMIT")
         except BaseException:
             self.conn.execute("ROLLBACK")
