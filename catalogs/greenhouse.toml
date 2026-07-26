@@ -1,0 +1,67 @@
+[[sources]]
+name = "greenhouse_canonical"
+source_type = "ats_greenhouse"
+connector = "greenhouse"
+base_url = "https://boards-api.greenhouse.io/v1/boards"
+board_identifier = "canonical"
+active = true
+request_timeout = 15.0
+rate_limit_delay = 1.0
+description = "Canonical Greenhouse board"
+career_url = "https://canonical.com/careers"
+
+[[sources]]
+name = "greenhouse_gitlab"
+source_type = "ats_greenhouse"
+connector = "greenhouse"
+base_url = "https://boards-api.greenhouse.io/v1/boards"
+board_identifier = "gitlab"
+active = true
+request_timeout = 15.0
+rate_limit_delay = 1.0
+description = "GitLab Greenhouse board"
+career_url = "https://about.gitlab.com/jobs/"
+
+[[sources]]
+name = "greenhouse_cloudflare"
+source_type = "ats_greenhouse"
+connector = "greenhouse"
+base_url = "https://boards-api.greenhouse.io/v1/boards"
+board_identifier = "cloudflare"
+active = true
+request_timeout = 15.0
+rate_limit_delay = 1.0
+description = "Cloudflare Greenhouse board"
+
+[[sources]]
+name = "greenhouse_datadog"
+source_type = "ats_greenhouse"
+connector = "greenhouse"
+base_url = "https://boards-api.greenhouse.io/v1/boards"
+board_identifier = "datadog"
+active = true
+request_timeout = 15.0
+rate_limit_delay = 1.0
+description = "Datadog Greenhouse board"
+
+[[sources]]
+name = "greenhouse_grafana"
+source_type = "ats_greenhouse"
+connector = "greenhouse"
+base_url = "https://boards-api.greenhouse.io/v1/boards"
+board_identifier = "grafana"
+active = true
+request_timeout = 15.0
+rate_limit_delay = 1.0
+description = "Grafana Labs Greenhouse board"
+
+[[sources]]
+name = "greenhouse_cockroachlabs"
+source_type = "ats_greenhouse"
+connector = "greenhouse"
+base_url = "https://boards-api.greenhouse.io/v1/boards"
+board_identifier = "cockroachlabs"
+active = true
+request_timeout = 15.0
+rate_limit_delay = 1.0
+description = "Cockroach Labs Greenhouse board"

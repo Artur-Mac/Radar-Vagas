@@ -1,0 +1,19 @@
+[[sources]]
+name = "remotive"
+source_type = "aggregator_api"
+connector = "remotive"
+base_url = "https://remotive.com/api/remote-jobs"
+active = true
+request_timeout = 15.0
+rate_limit_delay = 1.0
+description = "Remotive remote job aggregator API"
+
+[[sources]]
+name = "arbeitnow"
+source_type = "aggregator_api"
+connector = "arbeitnow"
+base_url = "https://www.arbeitnow.com/api/job-board-api"
+active = true
+request_timeout = 15.0
+rate_limit_delay = 1.0
+description = "Arbeitnow job board aggregator API"

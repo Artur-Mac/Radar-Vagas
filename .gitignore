@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+.dist/
+dist/
+
+# Environment
+.env
+
+# Database & Data
+*.db
+*.sqlite
+data/raw/*
+!data/raw/.gitkeep
+data/normalized/*
+!data/normalized/.gitkeep
+poc/data/raw/*
+!poc/data/raw/.gitkeep
+poc/data/normalized/*
+!poc/data/normalized/.gitkeep
+
+# IDEs & System
+.vscode/
+.idea/
+.DS_Store

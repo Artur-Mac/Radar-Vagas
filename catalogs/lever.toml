@@ -1,0 +1,43 @@
+[[sources]]
+name = "lever_spotify"
+source_type = "ats_lever"
+connector = "lever"
+base_url = "https://api.lever.co/v0/postings"
+company_identifier = "spotify"
+active = true
+request_timeout = 15.0
+rate_limit_delay = 1.0
+description = "Spotify Lever postings"
+
+[[sources]]
+name = "lever_netflix"
+source_type = "ats_lever"
+connector = "lever"
+base_url = "https://api.lever.co/v0/postings"
+company_identifier = "netflix"
+active = true
+request_timeout = 15.0
+rate_limit_delay = 1.0
+description = "Netflix Lever postings"
+
+[[sources]]
+name = "lever_palantir"
+source_type = "ats_lever"
+connector = "lever"
+base_url = "https://api.lever.co/v0/postings"
+company_identifier = "palantir"
+active = true
+request_timeout = 15.0
+rate_limit_delay = 1.0
+description = "Palantir Lever postings"
+
+[[sources]]
+name = "lever_plaid"
+source_type = "ats_lever"
+connector = "lever"
+base_url = "https://api.lever.co/v0/postings"
+company_identifier = "plaid"
+active = true
+request_timeout = 15.0
+rate_limit_delay = 1.0
+description = "Plaid Lever postings"
