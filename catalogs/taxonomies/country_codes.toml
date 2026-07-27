@@ -1,0 +1,31 @@
+version = "1.0.0"
+
+[[mappings]]
+country_code = "US"
+country_labels = ["united states", "usa", "us", "u.s.", "america"]
+keywords = ["united states", "usa", "us", "u.s.", "america"]
+
+[[mappings]]
+country_code = "BR"
+country_labels = ["brazil", "brasil", "br"]
+keywords = ["brazil", "brasil", "br"]
+
+[[mappings]]
+country_code = "DE"
+country_labels = ["germany", "deutschland", "de"]
+keywords = ["germany", "deutschland", "de", "berlin", "munich"]
+
+[[mappings]]
+country_code = "GB"
+country_labels = ["united kingdom", "uk", "u.k.", "england", "great britain"]
+keywords = ["united kingdom", "uk", "u.k.", "england", "london", "great britain"]
+
+[[mappings]]
+country_code = "CA"
+country_labels = ["canada", "ca"]
+keywords = ["canada", "ca", "toronto", "vancouver"]
+
+[[mappings]]
+country_code = "FR"
+country_labels = ["france", "fr"]
+keywords = ["france", "fr", "paris"]

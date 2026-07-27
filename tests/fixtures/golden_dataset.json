@@ -1,0 +1,170 @@
+[
+  {
+    "id": "golden_gh_01",
+    "source_name": "greenhouse",
+    "payload": {
+      "id": 101,
+      "title": "Senior Data Engineer (Remote - US)",
+      "absolute_url": "https://boards.greenhouse.io/gitlab/jobs/101",
+      "content": "Build large scale data pipelines with Python, Spark and dbt.",
+      "location": {"name": "Remote, United States"},
+      "updated_at": "2026-07-26T12:00:00Z",
+      "_board_identifier": "gitlab"
+    },
+    "expected": {
+      "company_name": "gitlab",
+      "job_title": "Senior Data Engineer (Remote - US)",
+      "country_code": "US",
+      "work_arrangement": "remote",
+      "role_family": "data_engineer",
+      "seniority": "senior"
+    }
+  },
+  {
+    "id": "golden_gh_02",
+    "source_name": "greenhouse",
+    "payload": {
+      "id": 102,
+      "title": "Lead Machine Learning Engineer",
+      "absolute_url": "https://boards.greenhouse.io/acme/jobs/102",
+      "content": "Train PyTorch models in Berlin, Germany.",
+      "location": {"name": "Berlin, Germany"},
+      "updated_at": "2026-07-26T14:00:00Z",
+      "_board_identifier": "acme"
+    },
+    "expected": {
+      "company_name": "acme",
+      "job_title": "Lead Machine Learning Engineer",
+      "country_code": "DE",
+      "role_family": "machine_learning_engineer",
+      "seniority": "lead"
+    }
+  },
+  {
+    "id": "golden_lev_01",
+    "source_name": "lever",
+    "payload": {
+      "id": "lev_201",
+      "text": "Junior Analytics Engineer",
+      "hostedUrl": "https://jobs.lever.co/spotify/lev_201",
+      "descriptionPlain": "dbt and Snowflake development in London, UK.",
+      "categories": {"location": "London, United Kingdom", "commitment": "Full-time"},
+      "createdAt": 1700000000000,
+      "_company_identifier": "Spotify Ltd."
+    },
+    "expected": {
+      "company_name": "Spotify",
+      "job_title": "Junior Analytics Engineer",
+      "country_code": "GB",
+      "employment_type": "full_time",
+      "role_family": "analytics_engineer",
+      "seniority": "junior"
+    }
+  },
+  {
+    "id": "golden_lev_02",
+    "source_name": "lever",
+    "payload": {
+      "id": "lev_202",
+      "text": "Principal MLOps Engineer",
+      "hostedUrl": "https://jobs.lever.co/stripe/lev_202",
+      "descriptionPlain": "Manage ML infrastructure with Kubernetes and Kubeflow.",
+      "categories": {"location": "Remote - Canada", "commitment": "Full-time"},
+      "createdAt": 1700000000000,
+      "_company_identifier": "Stripe"
+    },
+    "expected": {
+      "company_name": "Stripe",
+      "job_title": "Principal MLOps Engineer",
+      "country_code": "CA",
+      "work_arrangement": "remote",
+      "role_family": "mlops_engineer",
+      "seniority": "principal"
+    }
+  },
+  {
+    "id": "golden_rem_01",
+    "source_name": "remotive",
+    "payload": {
+      "id": 301,
+      "title": "AI Engineer (GenAI)",
+      "company_name": "OpenAI Inc.",
+      "url": "https://remotive.com/jobs/301",
+      "candidate_required_location": "Worldwide",
+      "job_type": "full_time",
+      "publication_date": "2026-07-26T10:00:00Z",
+      "description": "Develop LLM applications and RAG systems."
+    },
+    "expected": {
+      "company_name": "OpenAI",
+      "job_title": "AI Engineer (GenAI)",
+      "work_arrangement": "remote",
+      "role_family": "ai_engineer"
+    }
+  },
+  {
+    "id": "golden_rem_02",
+    "source_name": "remotive",
+    "payload": {
+      "id": 302,
+      "title": "Staff Data Scientist",
+      "company_name": "Scale AI",
+      "url": "https://remotive.com/jobs/302",
+      "candidate_required_location": "USA",
+      "job_type": "full_time",
+      "publication_date": "2026-07-26T11:00:00Z",
+      "description": "Statistical modeling and experimentation."
+    },
+    "expected": {
+      "company_name": "Scale AI",
+      "job_title": "Staff Data Scientist",
+      "country_code": "US",
+      "work_arrangement": "remote",
+      "role_family": "data_scientist",
+      "seniority": "staff"
+    }
+  },
+  {
+    "id": "golden_arb_01",
+    "source_name": "arbeitnow",
+    "payload": {
+      "slug": "data-analyst-munich-401",
+      "title": "Data Analyst",
+      "company_name": "Siemens AG",
+      "url": "https://arbeitnow.com/jobs/data-analyst-munich-401",
+      "location": "Munich, Germany",
+      "remote": true,
+      "created_at": 1700000000,
+      "description": "Business Intelligence and SQL reporting."
+    },
+    "expected": {
+      "company_name": "Siemens AG",
+      "job_title": "Data Analyst",
+      "country_code": "DE",
+      "work_arrangement": "remote",
+      "role_family": "data_analyst"
+    }
+  },
+  {
+    "id": "golden_arb_02",
+    "source_name": "arbeitnow",
+    "payload": {
+      "slug": "engenheiro-de-dados-501",
+      "title": "Engenheiro de Dados Pleno",
+      "company_name": "Nubank",
+      "url": "https://arbeitnow.com/jobs/engenheiro-de-dados-501",
+      "location": "Brasil",
+      "remote": true,
+      "created_at": 1700000000,
+      "description": "Construção de pipelines de dados em Python e Spark no Brasil."
+    },
+    "expected": {
+      "company_name": "Nubank",
+      "job_title": "Engenheiro de Dados Pleno",
+      "country_code": "BR",
+      "work_arrangement": "remote",
+      "role_family": "data_engineer",
+      "seniority": "mid"
+    }
+  }
+]

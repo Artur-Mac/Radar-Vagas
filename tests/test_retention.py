@@ -6,10 +6,10 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from radar_vagas.domain.canonical import CanonicalJobPost
 from radar_vagas.domain.models import (
     CleanedSourceText,
     IngestionSummary,
-    NormalizedJobLink,
     RawJobRecord,
     RetentionPolicy,
     RunManifest,
@@ -68,15 +68,17 @@ def test_retention_preview_does_not_mutate_data(tmp_path: Path):
         cleaned_text="cleaned",
     )
     storage.save_cleaned_text(cleaned)
-    storage.save_normalized_job_link(
-        NormalizedJobLink(
-            normalized_job_id="normalized-retention-test",
-            source_name="src_ret",
-            source_job_id="job_0",
-            observation_id=oldest_observation[0],
-            raw_content_hash=oldest_observation[1],
-            cleaned_id=cleaned.cleaned_id,
-        )
+    storage.save_normalized_records(
+        [
+            CanonicalJobPost(
+                normalized_job_id="normalized-retention-test",
+                source_name="src_ret",
+                source_job_id="job_0",
+                observation_id=oldest_observation[0],
+                raw_content_hash=oldest_observation[1],
+                cleaned_id=cleaned.cleaned_id,
+            )
+        ]
     )
 
     policy = RetentionPolicy(active=True, keep_minimum_runs=3)
@@ -103,6 +105,14 @@ def test_retention_preview_does_not_mutate_data(tmp_path: Path):
     assert jobs_after == 3
     links_after = storage.conn.execute("SELECT COUNT(*) FROM normalized_job_links").fetchone()[0]
     assert links_after == 0
+    normalized_after = storage.conn.execute(
+        "SELECT COUNT(*) FROM normalized_job_records"
+    ).fetchone()[0]
+    assert normalized_after == 0
+    provenance_after = storage.conn.execute(
+        "SELECT COUNT(*) FROM normalized_field_provenance"
+    ).fetchone()[0]
+    assert provenance_after == 0
     assert storage.verify_integrity().is_valid
 
     storage.close()

@@ -6,13 +6,16 @@ import re
 import shutil
 import tempfile
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import wraps
 from pathlib import Path
-from typing import Self
+from typing import Any, Self, cast
 
 import duckdb
 
+from radar_vagas.domain.canonical import CanonicalJobPost
 from radar_vagas.domain.models import (
     BackupManifest,
     CleanedSourceText,
@@ -23,9 +26,28 @@ from radar_vagas.domain.models import (
     RetentionReport,
     RunManifest,
 )
+from radar_vagas.infrastructure.lock import HistoryLock
 
 logger = logging.getLogger(__name__)
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+def history_lock_path(data_dir: Path) -> Path:
+    """Return a stable sibling lock path that survives data-directory replacement."""
+    return data_dir.parent / f".{data_dir.name}.history.lock"
+
+
+def locked_history_operation[LockedMethod: Callable[..., Any]](
+    method: LockedMethod,
+) -> LockedMethod:
+    """Serialize a complete historical mutation across processes."""
+
+    @wraps(method)
+    def wrapper(self: "HistoricalStorage", *args: Any, **kwargs: Any) -> Any:
+        with self.lock:
+            return method(self, *args, **kwargs)
+
+    return cast(LockedMethod, wrapper)
 
 
 class MigrationTamperedError(ValueError):
@@ -174,26 +196,87 @@ MIGRATIONS = [
         FOREIGN KEY (cleaned_id) REFERENCES cleaned_source_text(cleaned_id)
     );
     """,
+    """
+    CREATE TABLE normalized_job_records (
+        normalized_job_id VARCHAR PRIMARY KEY,
+        source_name VARCHAR NOT NULL,
+        source_job_id VARCHAR NOT NULL,
+        observation_id VARCHAR NOT NULL,
+        raw_content_hash VARCHAR NOT NULL,
+        cleaned_id VARCHAR,
+        company_name VARCHAR,
+        job_title VARCHAR,
+        location_raw VARCHAR,
+        city VARCHAR,
+        state_or_region VARCHAR,
+        country_code VARCHAR,
+        work_arrangement VARCHAR,
+        employment_type VARCHAR,
+        published_at TIMESTAMP,
+        description VARCHAR,
+        application_url VARCHAR,
+        role_family VARCHAR,
+        seniority VARCHAR,
+        language VARCHAR,
+        normalization_rule_version VARCHAR NOT NULL,
+        normalized_at TIMESTAMP NOT NULL,
+        FOREIGN KEY (observation_id) REFERENCES source_job_observations(observation_id),
+        FOREIGN KEY (cleaned_id) REFERENCES cleaned_source_text(cleaned_id),
+        UNIQUE (observation_id, normalization_rule_version)
+    );
+    """,
+    """
+    CREATE TABLE normalized_field_provenance (
+        provenance_id VARCHAR PRIMARY KEY,
+        normalized_job_id VARCHAR NOT NULL,
+        observation_id VARCHAR NOT NULL,
+        field_name VARCHAR NOT NULL,
+        original_value VARCHAR,
+        normalized_value VARCHAR,
+        extraction_rule VARCHAR NOT NULL,
+        rule_version VARCHAR NOT NULL,
+        confidence VARCHAR NOT NULL,
+        created_at TIMESTAMP NOT NULL,
+        FOREIGN KEY (normalized_job_id) REFERENCES normalized_job_records(normalized_job_id),
+        FOREIGN KEY (observation_id) REFERENCES source_job_observations(observation_id),
+        UNIQUE (normalized_job_id, field_name, rule_version)
+    );
+    """,
 ]
 
 
 class HistoricalStorage:
-    def __init__(self, data_dir: Path, *, db_path: Path | None = None):
+    def __init__(
+        self,
+        data_dir: Path,
+        *,
+        db_path: Path | None = None,
+        lock_timeout: float = 10.0,
+    ):
         self.data_dir = data_dir
         self.db_path = db_path or self.data_dir / "db" / "history.duckdb"
         self.blobs_dir = self.data_dir / "blobs" / "sha256"
 
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.blobs_dir.mkdir(parents=True, exist_ok=True)
-
-        self.conn = duckdb.connect(str(self.db_path))
-        self._apply_migrations()
+        self.lock = HistoryLock(history_lock_path(self.data_dir), timeout=lock_timeout)
+        with self.lock:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self.blobs_dir.mkdir(parents=True, exist_ok=True)
+            self.conn = duckdb.connect(str(self.db_path))
+            try:
+                self._apply_migrations()
+            except BaseException:
+                self.conn.close()
+                raise
 
     def __enter__(self) -> Self:
+        self.lock.acquire()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.close()
+        try:
+            self.close()
+        finally:
+            self.lock.release()
 
     def _apply_migrations(self) -> None:
         has_checksum_col = False
@@ -298,6 +381,7 @@ class HistoricalStorage:
         prefix2 = content_hash[2:4]
         return self.blobs_dir / prefix1 / prefix2 / f"{content_hash}.json"
 
+    @locked_history_operation
     def write_blob(self, content_hash: str, payload_str: str) -> None:
         payload_bytes = payload_str.encode("utf-8")
         computed_hash = hashlib.sha256(payload_bytes).hexdigest()
@@ -354,6 +438,7 @@ class HistoricalStorage:
             raise ValueError(f"Stored blob failed integrity check: {content_hash}")
         return payload
 
+    @locked_history_operation
     def save_cleaned_text(self, cleaned: CleanedSourceText) -> None:
         self.conn.execute(
             """
@@ -382,6 +467,8 @@ class HistoricalStorage:
                    transformation_version, cleaned_text, created_at
             FROM cleaned_source_text
             WHERE observation_id = ?
+            ORDER BY created_at DESC, transformation_version DESC, cleaned_id DESC
+            LIMIT 1
             """,
             [observation_id],
         ).fetchone()
@@ -397,37 +484,15 @@ class HistoricalStorage:
             created_at=row[6],
         )
 
+    @locked_history_operation
     def save_normalized_job_link(self, link: NormalizedJobLink) -> None:
-        observation = self.conn.execute(
-            """
-            SELECT source_name, source_job_id, content_hash
-            FROM source_job_observations
-            WHERE observation_id = ?
-            """,
-            [link.observation_id],
-        ).fetchone()
-        if observation is None:
-            raise ValueError(f"Unknown observation_id: {link.observation_id}")
-        if observation != (
-            link.source_name,
-            link.source_job_id,
-            link.raw_content_hash,
-        ):
-            raise ValueError("Normalized link provenance does not match its raw observation")
-
-        if link.cleaned_id is not None:
-            cleaned = self.conn.execute(
-                """
-                SELECT observation_id, raw_content_hash
-                FROM cleaned_source_text
-                WHERE cleaned_id = ?
-                """,
-                [link.cleaned_id],
-            ).fetchone()
-            if cleaned != (link.observation_id, link.raw_content_hash):
-                raise ValueError(
-                    "Normalized link cleaned artifact does not match its raw observation"
-                )
+        self._validate_normalized_provenance(
+            source_name=link.source_name,
+            source_job_id=link.source_job_id,
+            observation_id=link.observation_id,
+            raw_content_hash=link.raw_content_hash,
+            cleaned_id=link.cleaned_id,
+        )
 
         self.conn.execute(
             """
@@ -451,6 +516,46 @@ class HistoricalStorage:
                 link.created_at.isoformat(),
             ],
         )
+
+    def _validate_normalized_provenance(
+        self,
+        *,
+        source_name: str,
+        source_job_id: str,
+        observation_id: str,
+        raw_content_hash: str,
+        cleaned_id: str | None,
+    ) -> None:
+        observation = self.conn.execute(
+            """
+            SELECT source_name, source_job_id, content_hash
+            FROM source_job_observations
+            WHERE observation_id = ?
+            """,
+            [observation_id],
+        ).fetchone()
+        if observation is None:
+            raise ValueError(f"Unknown observation_id: {observation_id}")
+        if observation != (
+            source_name,
+            source_job_id,
+            raw_content_hash,
+        ):
+            raise ValueError("Normalized link provenance does not match its raw observation")
+
+        if cleaned_id is not None:
+            cleaned = self.conn.execute(
+                """
+                SELECT observation_id, raw_content_hash
+                FROM cleaned_source_text
+                WHERE cleaned_id = ?
+                """,
+                [cleaned_id],
+            ).fetchone()
+            if cleaned != (observation_id, raw_content_hash):
+                raise ValueError(
+                    "Normalized link cleaned artifact does not match its raw observation"
+                )
 
     def get_normalized_job_links(self, normalized_job_id: str) -> list[NormalizedJobLink]:
         rows = self.conn.execute(
@@ -477,6 +582,7 @@ class HistoricalStorage:
             for row in rows
         ]
 
+    @locked_history_operation
     def quarantine_record(self, record: HistoricalQuarantineRecord) -> None:
         self.conn.execute(
             """
@@ -581,6 +687,7 @@ class HistoricalStorage:
             invalid_blob_paths=tuple(sorted(invalid_blob_paths)),
         )
 
+    @locked_history_operation
     def import_run(
         self, manifest: RunManifest, records: list[RawJobRecord], missing_runs_threshold: int = 3
     ) -> None:
@@ -796,6 +903,7 @@ class HistoricalStorage:
             self.conn.execute("ROLLBACK")
             raise
 
+    @locked_history_operation
     def backup(self, destination_dir: Path) -> BackupManifest:
         if destination_dir.exists():
             raise FileExistsError(f"Backup destination already exists: {destination_dir}")
@@ -858,6 +966,12 @@ class HistoricalStorage:
     def restore(
         cls, backup_dir: Path, target_data_dir: Path, force: bool = False
     ) -> "HistoricalStorage":
+        with HistoryLock(history_lock_path(target_data_dir)):
+            cls._restore_files(backup_dir, target_data_dir, force=force)
+        return cls(target_data_dir, db_path=target_data_dir / "db" / "history.duckdb")
+
+    @classmethod
+    def _restore_files(cls, backup_dir: Path, target_data_dir: Path, force: bool = False) -> None:
         manifest_path = backup_dir / "backup_manifest.json"
         if not manifest_path.exists():
             raise FileNotFoundError(f"Backup manifest not found in {backup_dir}")
@@ -938,8 +1052,8 @@ class HistoricalStorage:
             raise
 
         logger.info("Successfully restored backup %s to %s", manifest.backup_id, target_data_dir)
-        return cls(target_data_dir, db_path=target_data_dir / "db" / "history.duckdb")
 
+    @locked_history_operation
     def prune_retention(self, policy: RetentionPolicy, force: bool = False) -> RetentionReport:
         if not policy.active and not force:
             logger.info("Retention policy inactive. Returning empty report.")
@@ -1004,6 +1118,42 @@ class HistoricalStorage:
             # transaction that deleted its FK child. Commit each dependency
             # level separately. Every phase is idempotent, so an interrupted
             # prune can be retried safely.
+            self.conn.execute("BEGIN TRANSACTION")
+            try:
+                self.conn.execute(
+                    f"""
+                    DELETE FROM normalized_field_provenance
+                    WHERE observation_id IN (
+                        SELECT observation_id
+                        FROM source_job_observations
+                        WHERE run_id IN ({placeholders})
+                    )
+                    """,
+                    eligible_run_ids,
+                )
+                self.conn.execute("COMMIT")
+            except BaseException:
+                self.conn.execute("ROLLBACK")
+                raise
+
+            self.conn.execute("BEGIN TRANSACTION")
+            try:
+                self.conn.execute(
+                    f"""
+                    DELETE FROM normalized_job_records
+                    WHERE observation_id IN (
+                        SELECT observation_id
+                        FROM source_job_observations
+                        WHERE run_id IN ({placeholders})
+                    )
+                    """,
+                    eligible_run_ids,
+                )
+                self.conn.execute("COMMIT")
+            except BaseException:
+                self.conn.execute("ROLLBACK")
+                raise
+
             self.conn.execute("BEGIN TRANSACTION")
             try:
                 self.conn.execute(
@@ -1100,8 +1250,188 @@ class HistoricalStorage:
             pruned_observations=obs_count,
             pruned_blobs=pruned_blobs_count,
             freed_bytes=freed_bytes,
-            recoverable=False,
         )
+
+    @locked_history_operation
+    def save_normalized_records(self, records: list[CanonicalJobPost]) -> None:
+        """Batch save normalized job records, field provenance, and normalized job links."""
+        if not records:
+            return
+
+        for rec in records:
+            self._validate_normalized_provenance(
+                source_name=rec.source_name,
+                source_job_id=rec.source_job_id,
+                observation_id=rec.observation_id,
+                raw_content_hash=rec.raw_content_hash,
+                cleaned_id=rec.cleaned_id,
+            )
+            for provenance in rec.provenance:
+                if (
+                    provenance.normalized_job_id != rec.normalized_job_id
+                    or provenance.observation_id != rec.observation_id
+                    or provenance.rule_version != rec.normalization_rule_version
+                ):
+                    raise ValueError("Field provenance does not match its normalized record")
+
+        chunk_size = 100
+        for start in range(0, len(records), chunk_size):
+            self._save_normalized_chunk(records[start : start + chunk_size])
+
+    def _save_normalized_chunk(self, records: list[CanonicalJobPost]) -> None:
+        record_rows = [
+            [
+                rec.normalized_job_id,
+                rec.source_name,
+                rec.source_job_id,
+                rec.observation_id,
+                rec.raw_content_hash,
+                rec.cleaned_id,
+                rec.company_name,
+                rec.job_title,
+                rec.location_raw,
+                rec.city,
+                rec.state_or_region,
+                rec.country_code,
+                rec.work_arrangement.value if rec.work_arrangement else None,
+                rec.employment_type.value if rec.employment_type else None,
+                rec.published_at.isoformat() if rec.published_at else None,
+                rec.description,
+                rec.application_url,
+                rec.role_family.value if rec.role_family else None,
+                rec.seniority.value if rec.seniority else None,
+                rec.language,
+                rec.normalization_rule_version,
+                rec.normalized_at.isoformat(),
+            ]
+            for rec in records
+        ]
+        link_rows = [
+            [
+                rec.normalized_job_id,
+                rec.source_name,
+                rec.source_job_id,
+                rec.observation_id,
+                rec.raw_content_hash,
+                rec.cleaned_id,
+                rec.normalization_rule_version,
+            ]
+            for rec in records
+        ]
+        provenance_rows = [
+            [
+                provenance.provenance_id,
+                rec.normalized_job_id,
+                rec.observation_id,
+                provenance.field_name,
+                provenance.original_value,
+                provenance.normalized_value,
+                provenance.extraction_rule,
+                provenance.rule_version,
+                provenance.confidence.value,
+                provenance.created_at.isoformat(),
+            ]
+            for rec in records
+            for provenance in rec.provenance
+        ]
+
+        self.conn.execute("BEGIN TRANSACTION")
+        try:
+            self.conn.executemany(
+                """
+                INSERT INTO normalized_job_records (
+                    normalized_job_id, source_name, source_job_id, observation_id,
+                    raw_content_hash, cleaned_id, company_name, job_title, location_raw,
+                    city, state_or_region, country_code, work_arrangement, employment_type,
+                    published_at, description, application_url, role_family, seniority,
+                    language, normalization_rule_version, normalized_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                record_rows,
+            )
+            self.conn.executemany(
+                """
+                INSERT INTO normalized_job_links (
+                    normalized_job_id, source_name, source_job_id, observation_id,
+                    raw_content_hash, cleaned_id, schema_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                link_rows,
+            )
+            if provenance_rows:
+                self.conn.executemany(
+                    """
+                    INSERT INTO normalized_field_provenance (
+                        provenance_id, normalized_job_id, observation_id, field_name,
+                        original_value, normalized_value, extraction_rule, rule_version,
+                        confidence, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    provenance_rows,
+                )
+            self.conn.execute("COMMIT")
+        except BaseException:
+            self.conn.execute("ROLLBACK")
+            raise
+
+    def get_latest_normalized_records(self, limit: int | None = None) -> list[CanonicalJobPost]:
+        """Fetch the latest normalized job records ordered by normalized_at descending."""
+        query = """
+            SELECT
+                normalized_job_id, source_name, source_job_id, observation_id,
+                raw_content_hash, cleaned_id, company_name, job_title, location_raw,
+                city, state_or_region, country_code, work_arrangement, employment_type,
+                published_at, description, application_url, role_family, seniority,
+                language, normalization_rule_version, normalized_at
+            FROM (
+                SELECT *,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY observation_id ORDER BY normalized_at DESC
+                       ) as rn
+                FROM normalized_job_records
+            )
+            WHERE rn = 1
+            ORDER BY normalized_at DESC
+        """
+        if limit:
+            query += f" LIMIT {int(limit)}"
+
+        rows = self.conn.execute(query).fetchall()
+        results: list[CanonicalJobPost] = []
+        for r in rows:
+            pub_at = (
+                r[14]
+                if isinstance(r[14], datetime)
+                else (datetime.fromisoformat(r[14]) if r[14] else None)
+            )
+            norm_at = r[21] if isinstance(r[21], datetime) else datetime.fromisoformat(r[21])
+            results.append(
+                CanonicalJobPost(
+                    normalized_job_id=r[0],
+                    source_name=r[1],
+                    source_job_id=r[2],
+                    observation_id=r[3],
+                    raw_content_hash=r[4],
+                    cleaned_id=r[5],
+                    company_name=r[6],
+                    job_title=r[7],
+                    location_raw=r[8],
+                    city=r[9],
+                    state_or_region=r[10],
+                    country_code=r[11],
+                    work_arrangement=r[12],
+                    employment_type=r[13],
+                    published_at=pub_at,
+                    description=r[15],
+                    application_url=r[16],
+                    role_family=r[17],
+                    seniority=r[18],
+                    language=r[19],
+                    normalization_rule_version=r[20],
+                    normalized_at=norm_at,
+                )
+            )
+        return results
 
     def close(self) -> None:
         self.conn.close()

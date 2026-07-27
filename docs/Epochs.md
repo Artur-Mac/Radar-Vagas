@@ -10,9 +10,15 @@
 
 ### Project Summary
 
-Data Career Radar is a local-first job market intelligence platform focused initially on Data Engineering, Data Science, Machine Learning, Analytics Engineering, MLOps, and AI Engineering roles.
+Data Career Radar is a job market and career intelligence platform with a local-first
+development foundation and a future path to an accessible hosted web product. It initially
+focuses on Data Engineering, Data Science, Machine Learning, Analytics Engineering, MLOps,
+and AI Engineering roles.
 
-The platform collects job postings from multiple public and authorized sources, stores their original content, normalizes inconsistent information, enriches postings with a locally hosted language model, and provides analytics about skills, technologies, companies, seniority levels, locations, and hiring trends.
+The platform collects job postings from multiple public and authorized sources, stores their
+original content, normalizes inconsistent information, enriches postings through deterministic
+rules and optional replaceable inference providers, and provides analytics about skills,
+technologies, companies, seniority levels, locations, and hiring trends.
 
 The first version is designed primarily as a personal career tool. It should help the user:
 
@@ -91,9 +97,10 @@ Collect a meaningful number of job postings from multiple sources while preservi
 
 Transform inconsistent job descriptions into a normalized data model that supports analytics and filtering.
 
-### Goal 3: Local AI Enrichment
+### Goal 3: Evidence-Based Hybrid Enrichment
 
-Use a locally hosted language model to extract information that cannot be reliably obtained through deterministic parsing alone.
+Use deterministic extraction first and optional replaceable inference providers for information
+that cannot be reliably obtained through rules alone.
 
 ### Goal 4: Personal Career Intelligence
 
@@ -114,7 +121,7 @@ Demonstrate practical knowledge of:
 * Data modeling
 * Data quality
 * NLP
-* Local LLM inference
+* Provider-independent and local inference
 * Search
 * Recommendation systems
 * Analytics
@@ -681,13 +688,15 @@ Jobs from different platforms can be searched and analyzed together.
 
 ---
 
-## Epic 6: Local LLM Enrichment
+## Epic 6: Evidence-Based Hybrid Enrichment
 
 ### Objective
 
-Use a locally hosted language model to transform unstructured descriptions into structured career information.
+Transform unstructured job descriptions into structured, traceable career information through
+a replaceable enrichment engine that combines deterministic extraction with optional
+language-model inference.
 
-### Initial Local Model Responsibilities
+### Initial Responsibilities
 
 * Extract technical skills.
 * Extract soft skills.
@@ -695,31 +704,50 @@ Use a locally hosted language model to transform unstructured descriptions into 
 * Identify minimum years of experience.
 * Identify education requirements.
 * Detect language requirements.
-* Classify role family.
-* Classify seniority.
-* Generate a short structured summary.
+* Resolve ambiguous role-family or seniority evidence without replacing reliable Época 5 data.
+* Generate a short evidence-based structured summary.
+* Attach evidence and provenance to extracted facts.
 
 ### Technical Requirements
 
-* The model must run locally through a supported inference runtime.
-* Outputs must follow a JSON schema.
-* Invalid responses must be retried or rejected.
-* Prompts must be versioned.
-* Model name and version must be stored with each result.
+* Deterministic extraction must run before optional model inference.
+* The enrichment engine must expose a provider-independent interface.
+* The initial implementation must include a no-LLM rule-based provider and may include Ollama
+  as the first inference adapter.
+* The architecture must support a future hosted provider without redesigning business logic.
+* Ingestion, normalization, search, and basic matching must continue working when model
+  inference is disabled or unavailable.
+* Model inference should be requested only for fields that remain incomplete or ambiguous.
+* Outputs must follow a versioned JSON schema and include supporting evidence where applicable.
+* Invalid responses must be retried within configured limits, rejected, or quarantined.
+* Provider, model, prompt, and schema versions must be stored with each result.
 * Original job text must always remain available.
-* Deterministic rules should be preferred when they are more reliable than an LLM.
+* Results must be cached by content hash, provider, model, prompt, and schema version.
+* Only new or changed descriptions should be enriched.
+* Enrichment must run asynchronously and must not block collection or basic product access.
+* Batch size, concurrency, timeout, retries, and per-run limits must be configurable.
+* The first local evaluation must use bounded batches and concurrency of one.
 
 ### Expected Outcome
 
-Unstructured job descriptions become useful structured records without requiring a paid API.
+Unstructured descriptions become structured and traceable records. The initial project can
+operate locally without a paid API, while a future web product can use centrally hosted
+inference without requiring users to own a powerful computer.
 
 ### Acceptance Criteria
 
-* The model returns valid structured output for most test postings.
-* Enrichment results include model metadata.
-* Failed extractions are traceable.
-* The system can reprocess jobs using another model or prompt version.
-* A small manually reviewed evaluation dataset is available.
+* At least one useful deterministic extraction stage operates without an LLM.
+* The application remains functional with enrichment inference disabled.
+* Previously processed content is not unnecessarily reprocessed.
+* Most evaluation postings produce valid structured output.
+* Extracted facts include evidence or deterministic provenance where applicable.
+* Enrichment results include provider, model, prompt, and schema metadata.
+* Failed extractions are traceable, retryable, and quarantined when unrecoverable.
+* The same description can be reprocessed with a different provider, model, prompt, or schema.
+* A manually reviewed dataset with at least 30 diverse postings measures field-level quality,
+  JSON validity, latency, failures, and unsupported claims.
+* One bounded Ollama evaluation may be included, but local inference is not a permanent
+  requirement for end users.
 
 ---
 
@@ -894,7 +922,7 @@ Measure the reliability of the collected and enriched data.
 * Duplicate rate.
 * Invalid URL rate.
 * Missing description rate.
-* LLM JSON validation rate.
+* Enrichment JSON validation rate by provider and version.
 * Skill extraction evaluation.
 * Seniority classification evaluation.
 * Manual review sample.
@@ -927,8 +955,8 @@ Make ingestion and enrichment failures easy to detect and investigate.
 * Connector execution status.
 * Records collected per source.
 * Records rejected.
-* Model processing time.
-* Model failure rate.
+* Enrichment processing time by provider.
+* Enrichment provider failure rate.
 * Retry count.
 * Pipeline duration.
 * Basic operational dashboard or report.
@@ -962,7 +990,7 @@ Present the project clearly to recruiters, engineers, and hiring managers.
 * Sample dataset.
 * Technical decisions.
 * Known limitations.
-* Local model explanation.
+* Hybrid enrichment and provider architecture explanation.
 * Evaluation results.
 * Setup instructions.
 * Future roadmap.
@@ -993,7 +1021,7 @@ The weekend version should demonstrate the complete flow:
 Collect jobs
 → store raw data
 → normalize records
-→ enrich descriptions locally
+→ enrich descriptions deterministically and optionally through a provider
 → calculate basic relevance
 → display searchable results and analytics
 ```
@@ -1057,10 +1085,12 @@ The weekend version should not include:
 * Polars or Pandas
 * DuckDB for the initial local version
 
-## Local Inference
+## Enrichment Providers
 
-* Ollama or another Linux-compatible inference runtime
-* A local instruction model capable of structured output
+* Provider-independent enrichment interface
+* Rule-based no-LLM provider
+* Optional Ollama adapter for local evaluation
+* Future hosted or customer-managed inference adapter
 * A separate embedding model when semantic search is introduced
 
 ## Frontend
@@ -1086,15 +1116,25 @@ One of the following:
 * Environment-based secrets.
 * Optional background worker after the MVP.
 
+## Deployment Evolution
+
+* The current local engine remains the fastest development and personal-use environment.
+* A future web application may expose the product through a browser and central API.
+* Shared job facts and enrichment results should be processed once and reused across users.
+* Candidate profiles, saved jobs, notes, and application state must remain private per user.
+* A hosted deployment may replace DuckDB with a server database without changing domain
+  contracts or provider interfaces.
+
 ---
 
 # 12. Architectural Principles
 
-## Local-First
+## Accessible Core
 
-The core product must remain functional without paid AI APIs.
+The core product must remain functional without mandatory model inference or paid AI APIs.
 
-Paid models may assist development, evaluation, or optional advanced features, but they must not be mandatory for basic operation.
+Local, hosted, or customer-managed providers may add advanced enrichment, but users of a
+future website must not be required to install a model or own a GPU.
 
 ## Raw Data Preservation
 
@@ -1120,7 +1160,8 @@ Previously processed jobs should not be repeatedly enriched unless their source 
 
 ## Replaceable Models
 
-The local model must be treated as a configurable component rather than embedded directly into business logic.
+Inference providers and models must be configurable components rather than embedded directly
+into business logic.
 
 ## Ethical Data Collection
 
@@ -1171,11 +1212,12 @@ Separate source jobs from canonical jobs and preserve all source relationships.
 
 Use JSON schema validation, confidence scores, manual evaluation, and deterministic fallback rules.
 
-## Risk: Local GPU Compatibility Problems
+## Risk: Enrichment Provider Cost or Availability
 
 ### Mitigation
 
-Keep model integration isolated behind an interface and support CPU fallback or smaller quantized models.
+Keep inference behind a provider interface, cache shared results, process only changed
+descriptions, use deterministic fallback rules, and enforce bounded background workloads.
 
 ## Risk: Scraping Instability
 

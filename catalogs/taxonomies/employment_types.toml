@@ -1,0 +1,17 @@
+version = "1.0.0"
+
+[[rules]]
+employment_type = "full_time"
+keywords = ["full_time", "full-time", "full time", "tempo integral", "clt", "permanent"]
+
+[[rules]]
+employment_type = "part_time"
+keywords = ["part_time", "part-time", "part time", "meio expediente"]
+
+[[rules]]
+employment_type = "contract"
+keywords = ["contract", "contractor", "freelance", "pj", "temporary"]
+
+[[rules]]
+employment_type = "internship"
+keywords = ["internship", "intern", "estagio", "estágio"]

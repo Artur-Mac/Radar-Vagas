@@ -1,0 +1,13 @@
+version = "1.0.0"
+
+[[rules]]
+work_arrangement = "remote"
+keywords = ["remote", "remoto", "teletrabajo", "work from home", "wfh", "anywhere", "worldwide"]
+
+[[rules]]
+work_arrangement = "hybrid"
+keywords = ["hybrid", "hibrido", "híbrido", "partial remote"]
+
+[[rules]]
+work_arrangement = "onsite"
+keywords = ["onsite", "on-site", "presencial", "in-office", "office"]

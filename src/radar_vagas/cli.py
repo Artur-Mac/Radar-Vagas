@@ -9,6 +9,7 @@ from radar_vagas.core.config import get_settings
 from radar_vagas.core.logging import setup_logging
 from radar_vagas.domain.models import RunState
 from radar_vagas.infrastructure.llm.ollama_client import OllamaClient
+from radar_vagas.infrastructure.lock import HistoryLockTimeoutError
 from radar_vagas.sources.catalog import get_active_sources, load_catalog
 
 
@@ -33,6 +34,15 @@ def non_negative_int(value: str) -> int:
 
 
 def main(args: list[str] | None = None) -> int:
+    """Run the CLI and convert history-lock contention into an actionable result."""
+    try:
+        return _main(args)
+    except HistoryLockTimeoutError as exc:
+        print(f"❌ Storage Lock Error: {exc}")
+        return 1
+
+
+def _main(args: list[str] | None = None) -> int:
     """CLI entrypoint function."""
     parser = argparse.ArgumentParser(
         prog="radar-vagas",
@@ -194,6 +204,21 @@ def main(args: list[str] | None = None) -> int:
         help="Inspect historical quarantine records",
     )
     history_quarantine.add_argument("--db-path", type=str, help="Path to DuckDB database")
+
+    # Command: normalize
+    norm_parser = subparsers.add_parser(
+        "normalize", help="Normalize raw job observations into canonical schema"
+    )
+    norm_parser.add_argument("--run-id", type=str, help="Specific run ID to normalize")
+    norm_parser.add_argument("--source", type=str, help="Specific source name to normalize")
+    norm_parser.add_argument("--limit", type=positive_int, help="Limit observations to normalize")
+    norm_parser.add_argument(
+        "--rule-version", type=str, default="1.0.0", help="Rule version string (default: 1.0.0)"
+    )
+    norm_parser.add_argument(
+        "--dry-run", action="store_true", help="Preview normalization without persisting"
+    )
+    norm_parser.add_argument("--db-path", type=str, help="Path to DuckDB database")
 
     parsed_args = parser.parse_args(args)
 
@@ -591,6 +616,61 @@ def main(args: list[str] | None = None) -> int:
                     "failed runs are not marked as imported."
                 )
             return 0
+
+    if parsed_args.command == "normalize":
+        db_path_str = parsed_args.db_path or settings.db_path
+        db_path = Path(db_path_str)
+        data_dir = db_path.parent.parent if db_path.parent.name == "db" else db_path.parent
+
+        from radar_vagas.core.normalization.service import NormalizationService
+        from radar_vagas.infrastructure.history import HistoricalStorage
+
+        try:
+            with HistoricalStorage(data_dir, db_path=db_path) as history:
+                service = NormalizationService(history)
+                report = service.normalize_batch(
+                    run_id=parsed_args.run_id,
+                    source_name=parsed_args.source,
+                    limit=parsed_args.limit,
+                    rule_version=parsed_args.rule_version,
+                    dry_run=parsed_args.dry_run,
+                )
+
+            mode_str = "PREVIEW (DRY-RUN)" if parsed_args.dry_run else "EXECUTION"
+            print("\n" + "=" * 60)
+            print(f"🧩 JOB NORMALIZATION [{mode_str}]")
+            print("=" * 60)
+            print(f"  Rule Version:            {parsed_args.rule_version}")
+            print(f"  Observations Discovered: {report.observations_discovered}")
+            print(f"  Records Normalized:      {report.records_normalized}")
+            print(f"  Records Skipped:         {report.records_skipped}")
+            print(f"  Records Rejected:        {report.records_rejected}")
+            print(f"  Records Quarantined:     {report.records_quarantined}")
+            print(f"  Elapsed Time:            {report.elapsed_seconds:.3f}s")
+
+            if report.counts_by_source:
+                print("\n  Counts by Source:")
+                for k, v in report.counts_by_source.items():
+                    print(f"    • {k:<25}: {v}")
+
+            if report.counts_by_role_family:
+                print("\n  Counts by Role Family:")
+                for k, v in report.counts_by_role_family.items():
+                    print(f"    • {k:<25}: {v}")
+
+            if report.counts_by_seniority:
+                print("\n  Counts by Seniority:")
+                for k, v in report.counts_by_seniority.items():
+                    print(f"    • {k:<25}: {v}")
+
+            print("\n  Counts of Missing Canonical Fields:")
+            for k, v in report.missing_canonical_fields.items():
+                print(f"    • {k:<25}: {v}")
+            print("=" * 60 + "\n")
+            return 0
+        except HistoryLockTimeoutError as e:
+            print(f"❌ Storage Lock Error: {e}")
+            return 1
 
     parser.print_help()
     return 0

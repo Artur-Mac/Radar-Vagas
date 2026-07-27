@@ -1,6 +1,7 @@
 """Core domain data models for Radar-Vagas."""
 
 import hashlib
+import uuid
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Literal
@@ -292,7 +293,7 @@ class CleanedSourceText(BaseModel):
 class HistoricalQuarantineRecord(BaseModel):
     """Structured record stored in historical quarantine."""
 
-    quarantine_id: str
+    quarantine_id: str = Field(default_factory=lambda: f"quar_{uuid.uuid4().hex[:12]}")
     run_id: str
     source_name: str
     source_job_id: str | None = None

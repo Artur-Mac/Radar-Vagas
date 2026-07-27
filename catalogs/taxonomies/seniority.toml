@@ -1,0 +1,45 @@
+version = "1.0.0"
+
+[[rules]]
+seniority = "executive"
+keywords = ["vice president", "vp", "chief", "cto", "cdo"]
+
+[[rules]]
+seniority = "director"
+keywords = ["director", "diretor", "diretora"]
+
+[[rules]]
+seniority = "head"
+keywords = ["head of", "head"]
+
+[[rules]]
+seniority = "manager"
+keywords = ["engineering manager", "manager", "gerente"]
+
+[[rules]]
+seniority = "principal"
+keywords = ["principal", "distinguished", "architect"]
+
+[[rules]]
+seniority = "staff"
+keywords = ["staff"]
+
+[[rules]]
+seniority = "lead"
+keywords = ["tech lead", "team lead", "lead", "lider", "liderança"]
+
+[[rules]]
+seniority = "senior"
+keywords = ["senior", "sr", "snr", "specialist"]
+
+[[rules]]
+seniority = "mid"
+keywords = ["mid-level", "mid", "pleno", "pl"]
+
+[[rules]]
+seniority = "junior"
+keywords = ["entry-level", "entry level", "junior", "jr", "associate"]
+
+[[rules]]
+seniority = "intern"
+keywords = ["internship", "intern", "estagiario", "estagiaria", "estagio", "trainee"]

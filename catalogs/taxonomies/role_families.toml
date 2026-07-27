@@ -1,0 +1,94 @@
+version = "1.0.0"
+
+[[rules]]
+role_family = "data_platform_engineer"
+keywords = [
+    "data platform engineer",
+    "data platform engineering",
+    "engenheiro de plataforma de dados",
+    "engenheira de plataforma de dados"
+]
+
+[[rules]]
+role_family = "business_intelligence_engineer"
+keywords = [
+    "business intelligence engineer",
+    "bi engineer",
+    "engenheiro de business intelligence",
+    "engenheira de business intelligence"
+]
+
+[[rules]]
+role_family = "technical_data_analyst"
+keywords = [
+    "technical data analyst",
+    "technical analyst",
+    "analista técnico de dados",
+    "analista técnica de dados"
+]
+
+[[rules]]
+role_family = "data_engineer"
+keywords = [
+    "data engineer",
+    "data engineering",
+    "etl engineer",
+    "pipeline engineer",
+    "big data engineer",
+    "engenheiro de dados",
+    "engenheira de dados"
+]
+
+[[rules]]
+role_family = "data_scientist"
+keywords = [
+    "data scientist",
+    "data science",
+    "cientista de dados",
+    "research scientist"
+]
+
+[[rules]]
+role_family = "machine_learning_engineer"
+keywords = [
+    "machine learning engineer",
+    "ml engineer",
+    "engenheiro de machine learning",
+    "engenheira de machine learning"
+]
+
+[[rules]]
+role_family = "analytics_engineer"
+keywords = [
+    "analytics engineer",
+    "analytics engineering",
+    "dbt engineer"
+]
+
+[[rules]]
+role_family = "mlops_engineer"
+keywords = [
+    "mlops engineer",
+    "ml ops",
+    "ml infrastructure engineer",
+    "machine learning operations"
+]
+
+[[rules]]
+role_family = "ai_engineer"
+keywords = [
+    "ai engineer",
+    "artificial intelligence engineer",
+    "llm engineer",
+    "genai engineer",
+    "generative ai"
+]
+
+[[rules]]
+role_family = "data_analyst"
+keywords = [
+    "data analyst",
+    "analista de dados",
+    "bi analyst",
+    "business intelligence analyst"
+]

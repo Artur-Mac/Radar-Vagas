@@ -1,145 +1,142 @@
-# Radar-Vagas Architecture Document (Época 4 closure candidate)
+# Radar-Vagas Architecture (Época 5)
 
 ## 1. Overview
 
-**Radar-Vagas** is a local-first job market intelligence platform. Épocas 1–3 built the
-connector framework, multi-source ingestion service, and local run storage. The Época 4 closure
-candidate provides an observable and replayable storage layer backed by DuckDB metadata,
-Content-Addressed Storage (CAS), versioned text cleaning, locally published snapshots,
-retention controls, and migration-tampering detection.
+Radar-Vagas is a local-first job and career intelligence engine designed to evolve into an
+accessible hosted web product. Épocas 1–4 established source connectors, atomic run storage,
+DuckDB history, SHA-256 Content-Addressed Storage (CAS), replay, cleaning, retention,
+quarantine, and verified backup/restore. Época 5 adds deterministic canonical normalization,
+versioned taxonomies, field provenance, and inter-process coordination.
 
----
+The local architecture is the current development and personal-use environment. Domain
+contracts deliberately avoid coupling the product to DuckDB, Ollama, or one future web stack.
 
-## 2. Directory Layout & Layer Separation
-
-```text
-Radar-Vagas/
-├── pyproject.toml              # Dependencies, build configs, CLI script entrypoint
-├── Makefile                    # Developer shortcut commands
-├── README.md                   # System documentation and setup guide
-├── .env.example                # Environment configuration template
-├── .github/workflows/ci.yml    # GitHub Actions CI workflow
-├── catalogs/                   # TOML source catalog files with governance metadata
-│   ├── aggregators.toml        # Remotive, Arbeitnow
-│   ├── greenhouse.toml         # Greenhouse ATS boards
-│   └── lever.toml              # Lever ATS companies
-├── docs/                       # Project specifications & architecture reports
-│   ├── AGENTS.md
-│   ├── Epochs.md
-│   ├── POC.md
-│   ├── ARCHITECTURE.md
-│   └── EPOCH4_REPORT.md
-├── src/
-│   └── radar_vagas/
-│       ├── __init__.py         # Package version export
-│       ├── cli.py              # CLI entry point (info, doctor, sources, collect, runs, history)
-│       ├── core/               # Configuration, logging, ingestion, and services
-│       │   ├── cleaner.py      # TextCleaner service for deterministic HTML tag stripping
-│       │   ├── history_service.py # High-level historical service & backup/restore orchestration
-│       │   ├── ingestion.py    # ConnectorRunner with scheduling quantum
-│       │   ├── config.py       # Typed Settings (pydantic-settings)
-│       │   └── logging.py      # Standardized logging formatter
-│       ├── domain/             # Core Entities, Schemas & Protocols
-│       │   ├── models.py       # RawJobRecord, CleanedSourceText, BackupManifest, RetentionPolicy, etc.
-│       │   └── connector.py    # JobConnector Protocol
-│       ├── connectors/         # Production connector implementations
-│       │   ├── remotive.py     # Remotive aggregator API connector
-│       │   ├── arbeitnow.py    # Arbeitnow aggregator API connector
-│       │   ├── greenhouse.py   # Greenhouse ATS Board API connector
-│       │   └── lever.py        # Lever ATS Postings API connector
-│       ├── sources/            # Source catalog and connector registry
-│       │   ├── catalog.py      # TOML catalog loader and filter utilities
-│       │   └── registry.py     # SourceType → ConnectorFactory registry
-│       └── infrastructure/     # External Clients & Infrastructure Interfaces
-│           ├── history.py      # DuckDB storage, CAS SHA-256 blobs, migrations, backup & prune
-│           ├── http.py         # HttpPolicy, polite_get, retry/backoff
-│           └── llm/
-│               └── ollama_client.py # Ollama service diagnostics
-├── poc/                        # Isolated experimental PoC scripts
-└── tests/                      # 100% offline test suite
-```
-
----
-
-## 3. Core Architectural Decisions
-
-### 3.1 Local-First & Zero-Cost Dependency
-- The application runs entirely on the developer's local machine (Linux).
-- All unit tests and core pipeline routines pass 100% offline without requiring internet access or active LLM daemons.
-
-### 3.2 Raw Payload Preservation & Content-Addressed Storage (CAS)
-- Ingestion connectors save 100% of raw JSON payloads.
-- Raw payloads are stored under a two-tier SHA-256 directory layout: `blobs/sha256/xx/yy/<hash>.json`.
-- Payload writes use atomic temporary files, `fsync`, and hard links to ensure immutability and crash resilience.
-
-### 3.3 Data Layer Provenance & Ownership
+## 2. Data Flow and Ownership
 
 ```mermaid
 graph TD
-    Layer1["Layer 1: Raw Observations (CAS Blobs + DuckDB)"] -->|observation_id + raw_content_hash| Layer2["Layer 2: Cleaned Source Text (cleaned_source_text)"]
-    Layer1 -->|raw_content_hash + observation_id| Layer3["Layer 3: normalized_job_links"]
-    Layer2 -->|cleaned_id| Layer3
+    Sources["Public APIs and ATS sources"] --> Runs["Atomic collection runs"]
+    Runs --> Raw["Raw observations + SHA-256 CAS"]
+    Raw --> Clean["Versioned cleaned text"]
+    Raw --> Normalize["Versioned canonical normalization"]
+    Clean --> Normalize
+    Normalize --> Provenance["Field provenance"]
+    Normalize --> Future["Época 6 hybrid enrichment"]
+    Future --> Matching["Future private profile matching"]
 ```
 
-1. **Layer 1 (Raw Payload & Observations)**: Owned by `HistoricalStorage` (`source_job_observations`, `raw_blobs`, `ingestion_runs`). Immutable.
-2. **Layer 2 (Derived Cleaned Text)**: Owned by `TextCleaner` (`cleaned_source_text`). Deterministic HTML tag stripping and entity decoding, versioned by `transformation_name` and `transformation_version`.
-3. **Layer 3 (Normalized Boundary Contract)**: `NormalizedJobLink` and the
-   `normalized_job_links` table persist provenance from future Época 5 entities back to raw
-   observations and optional cleaned artifacts.
+- **Raw observations** are immutable source evidence.
+- **Cleaned text** is reproducible derived data identified by transformation and version.
+- **Normalized records** represent one observation processed by one normalization rule
+  version.
+- **Field provenance** records original and normalized values, rule identity, version, and
+  confidence category.
+- **Future enrichment** must remain replaceable and must never become required for accessing
+  normalized jobs.
+- **Future profile and workflow data** belongs to a user-private boundary, separate from the
+  shared job corpus.
 
----
+## 3. Historical Storage
 
-## 4. Historical Storage & Governance Engine (Época 4)
+### 3.1 DuckDB and CAS
 
-### 4.1 DuckDB Schema & Sequential Migrations
+DuckDB stores ingestion runs, source lifecycle state, observations, cleaned artifacts,
+quarantine records, normalized versions, and provenance. Raw payloads live under
+`blobs/sha256/xx/yy/<content_hash>.json`. Reads verify that file contents still match their
+address.
 
-`HistoricalStorage` manages DuckDB migrations 0 through 12:
-- `schema_migrations`: Version tracking and SHA-256 checksum validation to detect migration tampering (`MigrationTamperedError`).
-- `ingestion_runs`: Global run metrics, timestamps, limits, and application version.
-- `source_runs`: Per-source execution metrics and state (`success`, `partial`, `failed`).
-- `raw_blobs`: Primary key registry of SHA-256 hashes and payload byte sizes.
-- `source_jobs`: Lifecycle metadata (`first_seen_at`, `last_seen_at`, `missing_complete_runs`, `status`).
-- `source_job_observations`: Granular observation instances (`observation_id`, `run_id`, `content_hash`, `observed_at`, `changed_since_previous`).
-- `cleaned_source_text`: Versioned cleaned text linked to `observation_id`.
-- `historical_quarantine`: Structured quarantine logging malformed payload envelopes with failure phase and error messages.
-- `normalized_job_links`: Persisted raw/cleaned provenance boundary for Época 5.
+Migrations are append-only and carry SHA-256 checksums. Opening a database rejects an unknown
+future schema or an applied migration whose checked-in SQL has changed.
 
-### 4.2 Backup and Restore Snapshot Strategy
+### 3.2 Inter-Process Lock
 
-`history backup` publishes a completed local snapshot atomically after creating:
-1. `history.duckdb` (checkpointed and copied)
-2. `blobs/sha256/...` (copied directory tree)
-3. `backup_manifest.json` containing backup ID, creation timestamp, schema version, total blob count, total byte size, and database SHA-256 checksum.
+`HistoryLock` uses Linux `fcntl.flock` on a stable sibling file:
 
-`history restore` safety rules:
-- Fails with `FileExistsError` if the target directory is non-empty, unless `--force` is specified.
-- Automatically verifies database SHA-256 checksum against `backup_manifest.json`.
-- Runs full `verify_integrity()` after restoring to validate filesystem/database parity.
+```text
+<data_dir parent>/.<data_dir name>.history.lock
+```
 
-The current implementation does not coordinate with a concurrent writer process. Collection,
-import, cleaning, and retention must be stopped while `history backup` copies the checkpointed
-database and CAS tree.
+The sibling location remains stable when restore atomically replaces the target data
+directory. Schema migrations and every public mutation acquire this lock. A
+`HistoricalStorage` context holds it across multi-step service operations; individual mutation
+methods also acquire it for callers that do not use a context. Same-thread nested operations
+are re-entrant.
 
-### 4.3 Retention & Deletion Safety
+Backup holds the same lock across checkpoint, database copy, CAS copy, manifest creation, and
+snapshot publication. Restore acquires the target lock before inspecting or replacing the
+target. Lock contention has a bounded timeout and becomes an actionable CLI error.
 
-`history prune` rules:
-- **Preview Mode (Default)**: Dry-run preview calculates eligible runs, observations, orphan blobs, and freed bytes without mutating disk state (`preview_only=True`).
-- **Destructive Mode (`--force`)**: Deletes old runs and observations while strictly respecting `keep_minimum_runs=5`.
-- **Ref-Count Protection**: Raw payload blobs referenced by any remaining observation are preserved; only unreferenced orphan blobs are removed.
+### 3.3 Backup, Restore, and Retention
 
-### 4.4 Migration Hardening & Recovery Procedures
+- Backup is assembled in a sibling staging directory and published by rename only when
+  complete.
+- Existing backup destinations are rejected rather than merged.
+- Restore verifies the manifest database checksum and full staged CAS integrity before target
+  replacement.
+- Forced restore keeps the prior target until the staged replacement is ready.
+- Retention is preview-only unless `--force` is supplied.
+- DuckDB foreign-key limitations require idempotent deletion phases ordered from normalized
+  provenance through observations to ingestion runs.
+- CAS files are removed only after their database metadata is unreferenced and committed.
 
-Every committed migration in `MIGRATIONS` has a computed SHA-256 checksum. When initializing `HistoricalStorage`:
-- If an applied migration in `schema_migrations` has a checksum mismatch with code, a `MigrationTamperedError` is raised immediately.
-- **Recovery Procedure**: If a migration script was accidentally edited after deployment, revert the code change to match the committed migration SQL, or run database recovery by restoring a valid backup snapshot via `radar-vagas history restore`.
+## 4. Canonical Normalization
 
----
+### 4.1 Schema
 
-## 5. Quality & Validation Metrics
+`CanonicalJobPost` includes source identity, observation and raw hashes, company, title,
+location components, ISO country code, work arrangement, employment type, publication date,
+description, application URL, role family, seniority, language, rule version, and timestamp.
+Missing or ambiguous values use `None`; placeholders such as `"unknown"` are not persisted.
 
-- **Test Suite**: Runs 100% offline.
-- **Linter & Formatter**: `ruff check .` and `ruff format .` clean.
-- **Git Diff**: `git diff --check` clean.
-- **Performance Budget**: Scale tests cover 300, 1,000, and 3,000 synthetic records. Wall-clock
-  results are filesystem-dependent and must be reported from the current environment rather
-  than copied into documentation.
+Controlled role families cover the product scope, including Data Platform Engineering,
+Business Intelligence Engineering, and Technical Data Analysis. Seniority distinguishes Staff
+from Principal.
+
+### 4.2 Source Adapters and Taxonomies
+
+Greenhouse, Lever, Remotive, and Arbeitnow have deterministic adapters. Source-specific
+identity rules preserve the exact `source_job_id` used by ingestion, including ATS board or
+company prefixes.
+
+Versioned TOML taxonomies control role family, seniority, work arrangement, employment type,
+and country mappings. Short aliases use token boundaries so values such as `de`, `us`, or `pl`
+cannot accidentally match arbitrary words.
+
+### 4.3 Identity, Versioning, and Provenance
+
+- `normalized_job_id` is a deterministic digest of source, source job ID, observation ID, and
+  normalization rule version.
+- `(observation_id, normalization_rule_version)` is unique and idempotent.
+- Changed source observations receive distinct normalized IDs.
+- Reprocessing with a new rule version preserves prior normalized history.
+- At most one latest cleaned artifact is selected per observation.
+- Storage verifies source identity, raw hash, cleaned-artifact ownership, and field-provenance
+  ownership before writing.
+- Invalid payloads or adapter failures are quarantined with `failure_phase="normalize"`.
+
+## 5. Future Product Direction
+
+Época 6 introduces evidence-based hybrid enrichment:
+
+```text
+deterministic extraction
+    -> ambiguity assessment
+    -> optional replaceable inference provider
+    -> schema validation and evidence
+    -> versioned shared cache
+```
+
+The no-LLM path remains functional. Ollama is an optional local evaluation adapter, not a
+requirement for future users. A hosted deployment can expose the engine through an API and web
+interface, process shared job facts once, and keep candidate profiles and application workflow
+private per user. See [PRODUCT_DIRECTION.md](PRODUCT_DIRECTION.md).
+
+## 6. Quality Standards
+
+- All automated tests run offline.
+- Source fixtures and a manually reviewed golden dataset protect deterministic behavior.
+- End-to-end tests cover import, cleaning, normalization, versioning, backup, restore, and
+  normalized queries.
+- Ruff formatting, Ruff linting, and `git diff --check` are required before commit.
+- Test counts and performance timings belong in dated validation reports rather than permanent
+  architecture claims.
